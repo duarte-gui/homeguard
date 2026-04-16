@@ -1,1 +1,5 @@
 *.zip
+*.OLD
+data/node_modules/
+data/dist/
+data/.parcel-cache/

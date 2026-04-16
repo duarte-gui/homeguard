@@ -379,9 +379,8 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsE
   } else if (type == WS_EVT_DATA) {
     AwsFrameInfo *info = (AwsFrameInfo*)arg;
     if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) {
-      data[len] = 0;
       JsonDocument doc;
-      deserializeJson(doc, (char*)data);
+      deserializeJson(doc, (char*)data, len);
       const char* command = doc["command"];
       if (strcmp(command, "toggleArm") == 0) {
         handleArmDisarm(!isArmed);
