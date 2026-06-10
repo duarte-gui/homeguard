@@ -4,6 +4,35 @@ Sistema de alarme residencial DIY baseado em **ESP32**, com interface web em Rea
 
 ---
 
+## Pré-requisitos (tenha em mãos antes de configurar)
+
+A configuração é feita pelo **celular** (portal hotspot). Antes, junte estes dados — abaixo, como obter cada um:
+
+### 1. Rede Wi-Fi
+- **Nome (SSID)** e **senha** da rede **2,4 GHz** onde o ESP32 vai ficar.
+  > O ESP32 não conecta em redes 5 GHz.
+
+### 2. Broker MQTT (no Home Assistant)
+O ESP fala com o HA por MQTT. Você precisa do **IP do broker**, um **usuário** e uma **senha**:
+1. No HA: **Configurações → Complementos (Add-ons) → Loja** → instale **"Mosquitto broker"** → **Iniciar**.
+2. Crie um usuário para o ESP: **Configurações → Pessoas → aba _Usuários_ → Adicionar usuário** (ex.: nome `mqtt`, com uma senha). O Mosquitto aceita usuários do próprio HA.
+3. Anote:
+   - **Broker (IP):** o IP do seu Home Assistant (ex.: `192.168.1.90`).
+   - **Porta:** `1883`.
+   - **Usuário / Senha:** os criados acima.
+
+### 3. Senha mestre (você escolhe)
+Um código de **4 a 8 dígitos**. É a senha mais importante: além de armar/desarmar, é a **única** que pode **programar o teclado** (cadastrar/remover senhas e resetar) e é usada para **desarmar pelo Home Assistant**. Guarde com cuidado.
+
+### 4. Telegram (opcional — alertas de violação)
+1. **Bot token:** no Telegram, fale com **@BotFather** → `/newbot` → escolha nome e usuário do bot → ele devolve um **token** (ex.: `123456789:AAH...`). Copie.
+2. **Chat ID:** fale com **@userinfobot** (ou **@RawDataBot**) → ele responde com seu **Id** numérico. Copie.
+   > Para receber as mensagens, abra uma conversa com o **seu** bot e envie um "oi" pelo menos uma vez.
+
+> Com isso em mãos: ligue o ESP32, conecte o celular ao Wi-Fi **`Homeguard-XXXX`** e preencha o portal.
+
+---
+
 ## Funcionalidades
 
 - Monitoramento de **5 setores físicos** (sensores magnéticos de porta/janela)
@@ -91,8 +120,8 @@ Na **primeira vez** (ou se o Wi-Fi salvo falhar), o ESP sobe um hotspot:
 
 1. No celular, conecte-se à rede **`Homeguard-XXXX`**.
 2. A tela de configuração abre sozinha (captive portal) — ou acesse `http://192.168.4.1`.
-3. Escolha a rede Wi-Fi, informe o **broker MQTT** (IP do Home Assistant), usuário/senha,
-   o **PIN** de desarme e uma **senha inicial** do teclado. Telegram é opcional.
+3. Escolha a rede Wi-Fi, informe o **broker MQTT** (IP do Home Assistant), usuário/senha
+   e a **senha mestre** (4-8 dígitos). Telegram é opcional.
 4. Toque em **Salvar e Reiniciar**. O ESP grava tudo em NVS e conecta na sua rede.
 
 A configuração fica persistida (`Preferences`/NVS). Para **reconfigurar do zero** (factory
@@ -226,14 +255,29 @@ física esteja desabilitada) — útil para automações no HA (ex.: alerta fala
 
 ## Teclado físico e cadastro de senhas
 
-As senhas do teclado ficam em NVS (lista, até 16). Protocolo do teclado Wiegand:
+Há uma **senha mestre** (definida no portal) e várias senhas comuns (até 16, em NVS).
+A `*` **sempre limpa os dígitos** (use no início de cada senha) — essa função não muda.
+
+**Operar** (qualquer senha comum **ou** a mestre):
 
 | Sequência | Ação |
 |---|---|
-| `<senha válida>` + `#` | Arma / desarma |
-| `<senha válida>` + `*` | Entra no **modo programação** |
-| (no modo prog.) `<nova senha>` + `#` | **Cadastra** a nova senha |
-| `*` | Cancela / sai do modo programação |
+| `*` `<senha>` `#` | Arma / desarma |
+
+**Programar** (somente a **senha mestre** tem autoridade):
+
+| Sequência | Ação |
+|---|---|
+| `#` (com o teclado "limpo") | Entra na programação → pede a mestre |
+| `<mestre>` `#` | Abre o **menu** |
+| menu → `1` → `<nova senha>` `#` | **Cadastra** uma senha |
+| menu → `2` → `<senha>` `#` | **Remove** uma senha |
+| menu → `0` → `<mestre>` `#` | **Reset de fábrica** (volta ao portal de config) |
+| `*` (com dígitos) | Limpa o que foi digitado |
+| `*` (já limpo) | Cancela a programação |
+
+> A entrada de programação é o **`#` sem nada digitado** — algo que não acontece ao operar
+> (você sempre digita a senha antes do `#`). Assim o `*` segue só limpando, como antes.
 
 **Cadastro remoto** (sem ir ao teclado):
 

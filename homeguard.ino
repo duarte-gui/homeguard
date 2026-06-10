@@ -111,8 +111,10 @@ unsigned long sirenStartMs = 0;      // p/ o auto-corte da sirene
 String sector_status[NUM_SECTORS];
 String last_sector_status[NUM_SECTORS];
 
-// --- Modo de programação do teclado (cadastro local de senha) ---
-bool keypadProgramMode = false;
+// --- Teclado: máquina de estados (programação exige senha mestre) ---
+// KP_AUTH = aguardando a senha mestre após "# com buffer vazio".
+enum KeypadState { KP_IDLE, KP_AUTH, KP_MENU, KP_ADD, KP_DEL, KP_RESET };
+KeypadState keypadState = KP_IDLE;
 
 // --- Tópicos MQTT (availability / LWT) ---
 const char* AVAILABILITY_TOPIC = "homeguard/availability";
@@ -173,6 +175,16 @@ void sendTelegramAlert(String message) {
 const char* alarmStateStr() {
   if (isTriggered) return "triggered";
   return isArmed ? "armed_away" : "disarmed";
+}
+
+// --- Autoridade das senhas ---
+// A senha MESTRE (definida no setup) é a ÚNICA que pode PROGRAMAR o teclado.
+bool isMaster(const String& c) {
+  return cfg.masterCode[0] != '\0' && c.equals(cfg.masterCode);
+}
+// Qualquer senha cadastrada (ou a mestre) pode apenas ARMAR/DESARMAR.
+bool isOperatingCode(const String& c) {
+  return isMaster(c) || Codes::check(c);
 }
 
 String readSensorStatus(int pin) {
@@ -604,48 +616,75 @@ void loop() {
 
 
   // --- LÓGICA TECLADO WIEGAND ---
-  // Protocolo:
-  //   <código válido> + #   -> arma/desarma
-  //   <código válido> + *   -> entra no MODO PROGRAMAÇÃO (cadastrar senha)
-  //   (no modo prog) <nova senha> + #  -> cadastra a nova senha
-  //   *                     -> cancela / sai do modo programação
+  // '*' SEMPRE limpa os dígitos (função preservada). Com o buffer já vazio, cancela a programação.
+  // Operar (qualquer senha cadastrada OU a mestre):
+  //   [*] <senha> #            -> arma / desarma
+  // Programar (SÓ a senha MESTRE):
+  //   #  (com o buffer vazio)  -> pede a mestre:  <mestre> #
+  //     1 -> CADASTRAR: <nova senha> #
+  //     2 -> REMOVER:   <senha> #
+  //     0 -> RESET:     <mestre> #     (factory reset -> volta ao portal)
   if (wiegand.available()) {
     uint32_t key = wiegand.getCode();
     lastKeypadInputTime = currentMillis;
 
-    if (key <= 9) {
-      keypadBuffer += String(key);
-    }
-    else if (key == 11) { // '#' (Enter)
-      if (keypadProgramMode) {
-        if (Codes::add(keypadBuffer, "teclado")) {
-          Serial.println("[CODES] Nova senha cadastrada pelo teclado.");
-          publishCodesList();
-        } else {
-          Serial.println("[CODES] Falha ao cadastrar (curta/duplicada/cheia).");
-        }
-        keypadProgramMode = false;
-      } else if (Codes::check(keypadBuffer)) {
-        handleArmDisarm(!isArmed);
-      }
+    if (key == 10) {                 // '*' -> LIMPA os dígitos (nunca muda)
+      if (keypadBuffer.length() == 0) keypadState = KP_IDLE; // '*' com buffer vazio -> cancela
       keypadBuffer = "";
     }
-    else if (key == 10) { // '*'
-      if (!keypadProgramMode && Codes::check(keypadBuffer)) {
-        keypadProgramMode = true;   // código válido + * -> entra no cadastro
-        Serial.println("[CODES] Modo programacao: digite a NOVA senha e pressione #.");
-      } else {
-        keypadProgramMode = false;  // cancela / sai
+    else if (keypadState == KP_MENU) {   // escolha da operação (uma tecla)
+      if (key == 1)      { keypadState = KP_ADD;   Serial.println("[KP] CADASTRAR: nova senha + #"); }
+      else if (key == 2) { keypadState = KP_DEL;   Serial.println("[KP] REMOVER: senha + #"); }
+      else if (key == 0) { keypadState = KP_RESET; Serial.println("[KP] RESET: digite a MESTRE + #"); }
+      keypadBuffer = "";
+    }
+    else if (key <= 9) {             // dígito
+      keypadBuffer += String(key);
+    }
+    else if (key == 11) {            // '#'
+      switch (keypadState) {
+        case KP_IDLE:
+          if (keypadBuffer.length() == 0) {
+            keypadState = KP_AUTH;   // '#' com buffer vazio -> entra na programação
+            Serial.println("[KP] PROGRAMACAO: digite a senha MESTRE + #");
+          } else if (isOperatingCode(keypadBuffer)) {
+            handleArmDisarm(!isArmed);
+          }
+          break;
+        case KP_AUTH:
+          if (isMaster(keypadBuffer)) {
+            keypadState = KP_MENU;
+            Serial.println("[KP] MENU: 1=cadastrar  2=remover  0=reset  (* cancela)");
+          } else { keypadState = KP_IDLE; Serial.println("[KP] senha mestre incorreta"); }
+          break;
+        case KP_ADD:
+          if (Codes::add(keypadBuffer, "teclado")) { Serial.println("[KP] senha cadastrada"); publishCodesList(); }
+          else Serial.println("[KP] falha (curta/duplicada/cheia)");
+          keypadState = KP_IDLE;
+          break;
+        case KP_DEL:
+          if (Codes::remove(keypadBuffer)) { Serial.println("[KP] senha removida"); publishCodesList(); }
+          else Serial.println("[KP] senha nao encontrada");
+          keypadState = KP_IDLE;
+          break;
+        case KP_RESET:
+          if (isMaster(keypadBuffer)) {
+            Serial.println("[KP] FACTORY RESET pelo teclado.");
+            Storage::clearAll(); delay(300); ESP.restart();
+          } else { Serial.println("[KP] mestre incorreta - reset cancelado"); }
+          keypadState = KP_IDLE;
+          break;
+        default: break;
       }
       keypadBuffer = "";
     }
   }
 
-  // --- Timeout do Teclado (também sai do modo programação) ---
-  if ((keypadBuffer.length() > 0 || keypadProgramMode) &&
+  // --- Timeout do Teclado (volta ao estado ocioso) ---
+  if ((keypadBuffer.length() > 0 || keypadState != KP_IDLE) &&
       (currentMillis - lastKeypadInputTime > keypadTimeout)) {
     keypadBuffer = "";
-    keypadProgramMode = false;
+    keypadState = KP_IDLE;
   }
 
   // --- AUTO-CORTE DA SIRENE (timeout) ---

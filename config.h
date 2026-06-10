@@ -26,7 +26,8 @@ struct Config {
   uint16_t mqttPort;
   char mqttUser[33];
   char mqttPass[65];
-  char haPin[HG_CODE_LEN];     // PIN exigido p/ DESARMAR pelo HA
+  char masterCode[HG_CODE_LEN];// SENHA MESTRE (teclado: programar; tb usada como PIN do HA)
+  char haPin[HG_CODE_LEN];     // PIN exigido p/ DESARMAR pelo HA (= masterCode por padrão)
   // Telegram (opcional)
   char botToken[64];
   char chatId[24];

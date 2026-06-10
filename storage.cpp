@@ -21,6 +21,7 @@ Config Storage::loadConfig() {
     cfg.mqttPort = p.getUShort("mqttPort", 1883);
     p.getString("mqttUser", cfg.mqttUser, sizeof(cfg.mqttUser));
     p.getString("mqttPass", cfg.mqttPass, sizeof(cfg.mqttPass));
+    p.getString("master",   cfg.masterCode, sizeof(cfg.masterCode));
     p.getString("haPin",    cfg.haPin,    sizeof(cfg.haPin));
     p.getString("botToken", cfg.botToken, sizeof(cfg.botToken));
     p.getString("chatId",   cfg.chatId,   sizeof(cfg.chatId));
@@ -41,6 +42,7 @@ void Storage::saveConfig(const Config& cfg) {
   p.putUShort("mqttPort", cfg.mqttPort);
   p.putString("mqttUser", cfg.mqttUser);
   p.putString("mqttPass", cfg.mqttPass);
+  p.putString("master",   cfg.masterCode);
   p.putString("haPin",    cfg.haPin);
   p.putString("botToken", cfg.botToken);
   p.putString("chatId",   cfg.chatId);

@@ -54,18 +54,15 @@ static const char PORTAL_HTML[] PROGMEM = R"rawhtml(
   <h2>Home Assistant / MQTT</h2>
   <label>Broker (IP do Home Assistant)</label>
   <input id="mqttHost" placeholder="192.168.1.90">
-  <div class="row">
-    <div><label>Porta</label><input id="mqttPort" type="number" value="1883"></div>
-    <div><label>PIN p/ desarmar</label><input id="haPin" inputmode="numeric" placeholder="1234"></div>
-  </div>
+  <label>Porta</label><input id="mqttPort" type="number" value="1883">
   <label>Usuário MQTT</label><input id="mqttUser" placeholder="mqtt">
   <label>Senha MQTT</label><input id="mqttPass" type="password" placeholder="&bull;&bull;&bull;&bull;">
 </div>
 
 <div class="card">
-  <h2>Senha inicial do teclado</h2>
-  <label>Código (4-8 dígitos)</label>
-  <input id="code0" inputmode="numeric" placeholder="ex: 1234">
+  <h2>&#x1F511; Senha mestre</h2>
+  <label>4 a 8 dígitos &mdash; usada para PROGRAMAR o teclado (cadastrar/remover senhas, reset) e para desarmar no Home Assistant. Guarde com cuidado.</label>
+  <input id="master" inputmode="numeric" placeholder="ex: 1234">
 </div>
 
 <div class="card">
@@ -105,10 +102,11 @@ function save(){
   var msg=document.getElementById('msg');
   if(!selSSID){msg.textContent='Selecione a rede Wi-Fi.';return;}
   if(!val('mqttHost')){msg.textContent='Informe o broker MQTT.';return;}
+  if(val('master').length<4){msg.textContent='Defina a senha mestre (mín. 4 dígitos).';return;}
   var d={ssid:selSSID,pass:document.getElementById('pass').value,
     mqttHost:val('mqttHost'),mqttPort:parseInt(val('mqttPort')||'1883'),
     mqttUser:val('mqttUser'),mqttPass:document.getElementById('mqttPass').value,
-    haPin:val('haPin')||'1234',code0:val('code0'),
+    master:val('master'),
     botToken:val('botToken'),chatId:val('chatId')};
   msg.textContent='Salvando...';
   fetch('/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)})
@@ -159,25 +157,14 @@ static void handleSave() {
   cfg.mqttPort = doc["mqttPort"] | 1883;
   strlcpy(cfg.mqttUser, doc["mqttUser"] | "", sizeof(cfg.mqttUser));
   strlcpy(cfg.mqttPass, doc["mqttPass"] | "", sizeof(cfg.mqttPass));
-  strlcpy(cfg.haPin,    doc["haPin"]    | "1234", sizeof(cfg.haPin));
-  strlcpy(cfg.botToken, doc["botToken"] | "", sizeof(cfg.botToken));
-  strlcpy(cfg.chatId,   doc["chatId"]   | "", sizeof(cfg.chatId));
+  // Senha MESTRE (autoridade do teclado) — também vira o PIN de desarme no HA.
+  const char* master = doc["master"] | "1234";
+  strlcpy(cfg.masterCode, master, sizeof(cfg.masterCode));
+  strlcpy(cfg.haPin,      master, sizeof(cfg.haPin));
+  strlcpy(cfg.botToken,   doc["botToken"] | "", sizeof(cfg.botToken));
+  strlcpy(cfg.chatId,     doc["chatId"]   | "", sizeof(cfg.chatId));
   cfg.configured = true;
   Storage::saveConfig(cfg);
-
-  // Senha inicial do teclado (se informada)
-  const char* code0 = doc["code0"] | "";
-  if (strlen(code0) >= 4) {
-    KeypadCode codes[HG_MAX_CODES];
-    int n = Storage::loadCodes(codes, HG_MAX_CODES);
-    bool exists = false;
-    for (int i = 0; i < n; i++) if (strcmp(codes[i].code, code0) == 0) exists = true;
-    if (!exists && n < HG_MAX_CODES) {
-      strlcpy(codes[n].code,  code0,    sizeof(codes[n].code));
-      strlcpy(codes[n].label, "inicial", sizeof(codes[n].label));
-      Storage::saveCodes(codes, n + 1);
-    }
-  }
 
   server.send(200, "application/json", "{\"ok\":true}");
   g_done = true;
