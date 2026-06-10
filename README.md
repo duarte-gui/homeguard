@@ -10,8 +10,12 @@ Sistema de alarme residencial DIY baseado em **ESP32**, com interface web em Rea
 - Interface web em tempo real via **WebSocket**
 - Armar/Desarmar pelo navegador, pelo **Home Assistant** ou pelo **teclado Wiegand**
 - **Sirene** acionada automaticamente ao detectar violação com o sistema armado
+  - **Auto-corte por timeout** (configurável) e **switch de gating** no HA ("Sirene habilitada") — permite **disparar o alerta sem tocar a sirene física**
 - **Notificações via Telegram** com o setor violado
 - **Auto-discovery MQTT** — sensores e painel de alarme aparecem automaticamente no Home Assistant
+  - Estado **`triggered`** do painel + **availability/LWT** (entidades ficam `unavailable` se o ESP cair)
+- **Configuração por hotspot** (captive portal no celular) — sem segredos no código, tudo em NVS
+- **Cadastro de senhas** do teclado — local (no próprio teclado) e remoto (MQTT / interface web)
 - Arquivos da interface servidos diretamente do ESP32 via **LittleFS** (sem depender de CDN externo)
 
 ---
@@ -53,6 +57,10 @@ Sistema de alarme residencial DIY baseado em **ESP32**, com interface web em Rea
 ```
 homeguard/
 ├── homeguard.ino          # Firmware principal do ESP32
+├── config.h               # struct Config (NVS) + KeypadCode
+├── storage.h / .cpp       # Persistência em NVS (config + senhas)
+├── provisioning.h / .cpp  # Portal hotspot (captive portal) de configuração
+├── codes.h / .cpp         # Gerência das senhas do teclado
 ├── Wiegand.h              # Biblioteca Wiegand local
 ├── Wiegand.cpp            # Biblioteca Wiegand local
 ├── flash.sh               # Script de deploy automatizado
@@ -74,30 +82,22 @@ homeguard/
 
 ---
 
-## Configuração do Firmware
+## Configuração — portal hotspot (sem editar código)
 
-Antes de compilar, edite as seguintes constantes em `homeguard.ino`:
+> **Não há mais segredos no código.** Wi-Fi, MQTT, Telegram, PIN e a senha inicial
+> são preenchidos pelo celular, num portal de configuração (captive portal).
 
-```cpp
-// Wi-Fi
-const char* ssid     = "sua_rede";
-const char* password = "sua_senha";
+Na **primeira vez** (ou se o Wi-Fi salvo falhar), o ESP sobe um hotspot:
 
-// Telegram
-#define BOT_TOKEN "seu_bot_token"
-#define CHAT_ID   "seu_chat_id"
+1. No celular, conecte-se à rede **`Homeguard-XXXX`**.
+2. A tela de configuração abre sozinha (captive portal) — ou acesse `http://192.168.4.1`.
+3. Escolha a rede Wi-Fi, informe o **broker MQTT** (IP do Home Assistant), usuário/senha,
+   o **PIN** de desarme e uma **senha inicial** do teclado. Telegram é opcional.
+4. Toque em **Salvar e Reiniciar**. O ESP grava tudo em NVS e conecta na sua rede.
 
-// MQTT / Home Assistant
-const char* mqtt_server   = "192.168.1.x";   // IP do broker / Home Assistant
-const char* mqtt_user     = "usuario_mqtt";
-const char* mqtt_password = "senha_mqtt";
-
-// Código de segurança para o Home Assistant
-const char* HOME_ASSISTANT_PIN_CODE = "1234";
-
-// Códigos aceitos pelo teclado Wiegand (# para confirmar, * para cancelar)
-const String MASTER_CODES[NUM_MASTER_CODES] = {"1234", "4321", "0987"};
-```
+A configuração fica persistida (`Preferences`/NVS). Para **reconfigurar do zero** (factory
+reset), publique `factory_reset` no tópico MQTT `homeguard/system/command` (ou apague a NVS),
+e o portal volta a aparecer.
 
 ---
 
@@ -209,15 +209,57 @@ Após o ESP32 iniciar e conectar ao broker MQTT, as entidades são criadas autom
 
 | Entidade | Tipo | Tópico de estado |
 |---|---|---|
-| ESP32 Homeguard (painel) | `alarm_control_panel` | `homeguard/alarm/state` |
+| ESP32 Homeguard (painel) | `alarm_control_panel` | `homeguard/alarm/state` (`disarmed`/`armed_away`/`triggered`) |
 | ESP32 Homeguard Siren | `switch` | `homeguard/siren/state` |
+| ESP32 Homeguard Sirene habilitada | `switch` | `homeguard/siren_enabled/state` (gating) |
 | Portão Garagem | `binary_sensor` | `homeguard/sector/1/state` |
 | Presença Garagem | `binary_sensor` | `homeguard/sector/2/state` |
 | Portão Principal | `binary_sensor` | `homeguard/sector/3/state` |
 | Porta Gui | `binary_sensor` | `homeguard/sector/4/state` |
 | Porta Gu | `binary_sensor` | `homeguard/sector/5/state` |
 
-**Armar** não exige código. **Desarmar** exige o PIN configurado em `HOME_ASSISTANT_PIN_CODE`.
+**Armar** não exige código. **Desarmar** exige o **PIN** definido no portal de configuração.
+Quando há violação com o sistema armado, o painel vai para `triggered` (mesmo que a sirene
+física esteja desabilitada) — útil para automações no HA (ex.: alerta falado na Alexa).
+
+---
+
+## Teclado físico e cadastro de senhas
+
+As senhas do teclado ficam em NVS (lista, até 16). Protocolo do teclado Wiegand:
+
+| Sequência | Ação |
+|---|---|
+| `<senha válida>` + `#` | Arma / desarma |
+| `<senha válida>` + `*` | Entra no **modo programação** |
+| (no modo prog.) `<nova senha>` + `#` | **Cadastra** a nova senha |
+| `*` | Cancela / sai do modo programação |
+
+**Cadastro remoto** (sem ir ao teclado):
+
+- **MQTT** — publique no tópico `homeguard/codes/set`:
+  ```json
+  {"action":"add","code":"4567","label":"Gui"}
+  {"action":"remove","code":"4567"}
+  ```
+- **Interface web (WebSocket)** — comandos `{"command":"addCode","code":"...","label":"..."}`
+  e `{"command":"removeCode","code":"..."}`.
+
+> A lista publicada em `homeguard/codes/list` mostra apenas **rótulos e tamanho** — nunca os
+> valores das senhas.
+
+---
+
+## Tópicos MQTT (avançado)
+
+| Tópico | Direção | Uso |
+|---|---|---|
+| `homeguard/availability` | ESP→ | `online` / `offline` (LWT) |
+| `homeguard/alarm/command` | →ESP | `ARM_AWAY` / `DISARM` |
+| `homeguard/siren/command` | →ESP | `ON` (ativa) / `OFF` (silencia) |
+| `homeguard/siren_enabled/command` | →ESP | `ON` / `OFF` (gating da sirene física) |
+| `homeguard/codes/set` | →ESP | JSON add/remove de senha |
+| `homeguard/system/command` | →ESP | `reboot` / `factory_reset` |
 
 ---
 
