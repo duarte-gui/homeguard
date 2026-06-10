@@ -49,34 +49,23 @@
 #include "LittleFS.h"
 #include "Wiegand.h"
 #include <PubSubClient.h> // NOVO: Biblioteca para MQTT
+#include "config.h"       // struct Config (NVS)
+#include "storage.h"      // persistência NVS
+#include "provisioning.h" // portal de configuração (hotspot)
+#include "codes.h"        // senhas do teclado
 
 // =================================================================
 // 2. CONFIGURAÇÕES - AJUSTE ESTAS VARIÁVEIS
 // =================================================================
 
-// --- Configurações de Rede ---
-const char* ssid = "seu_ssid";
-const char* password = "sua_senha";
+// --- Configuração: carregada da NVS (preenchida pelo portal hotspot) ---
+// Segredos NÃO ficam mais no código. Ver provisioning.* / storage.*
+Config cfg;
+const char* device_name = "ESP32 Homeguard"; // Nome que aparece no Home Assistant
 
-// --- Configurações do Telegram ---
-#define BOT_TOKEN "12345678:GGHHSSYE7785kjgGgK"
-#define CHAT_ID "999999999"
-
-// --- Configurações do MQTT (NOVO) ---
-const char* mqtt_server = "192.168.1.90"; // IP do seu Home Assistant ou broker MQTT
-const int mqtt_port = 1883;
-const char* mqtt_user = "usuario_MQTT"; // CORRIGIDO: Usuário detectado nos logs
-const char* mqtt_password = "senha_MQTT"; // IMPORTANTE: Coloque a senha do usuário 'casa' aqui
-const char* device_name = "ESP32 Homeguard"; // Nome que aparecerá no Home Assistant
-
-// --- Configurações do Home Assistant ---
-const char* HOME_ASSISTANT_PIN_CODE = "1234"; // Defina o código a ser usado no HA
-
-// --- Configurações do Teclado Wiegand ---
+// --- Teclado Wiegand (senhas agora no módulo Codes / NVS) ---
 const int WIEGAND_D0_PIN = 18;
 const int WIEGAND_D1_PIN = 19;
-const int NUM_MASTER_CODES = 3;
-const String MASTER_CODES[NUM_MASTER_CODES] = {"1234", "4321", "0987"};
 
 // --- Mapeamento de Pinos (GPIO) ---
 const int SECTOR_1_PIN = 13;
@@ -106,7 +95,7 @@ const int sector_pins[NUM_SECTORS] = {SECTOR_1_PIN, SECTOR_2_PIN, SECTOR_3_PIN, 
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 WiFiClientSecure secured_client;
-UniversalTelegramBot bot(BOT_TOKEN, secured_client);
+UniversalTelegramBot* bot = nullptr; // instanciado no setup, após carregar a config
 Wiegand wiegand;
 
 // --- MQTT (NOVO) ---
@@ -116,9 +105,17 @@ PubSubClient mqttClient(wifiClient);
 // --- Estado do Sistema ---
 bool isArmed = false;
 bool isSirenActive = false;
+bool isTriggered = false;            // alarme disparado (independe da sirene física)
 int triggeringSectorId = 0;
+unsigned long sirenStartMs = 0;      // p/ o auto-corte da sirene
 String sector_status[NUM_SECTORS];
 String last_sector_status[NUM_SECTORS];
+
+// --- Modo de programação do teclado (cadastro local de senha) ---
+bool keypadProgramMode = false;
+
+// --- Tópicos MQTT (availability / LWT) ---
+const char* AVAILABILITY_TOPIC = "homeguard/availability";
 
 // --- Controle de Tempo ---
 unsigned long lastStatusCheck = 0;
@@ -135,11 +132,13 @@ const long keypadTimeout = 5000;
 // =================================================================
 
 void publishFullMqttState(); // Forward declaration
+void publishCodesList();     // Forward declaration
 
 String getFullStateJson() {
   JsonDocument doc;
   doc["isArmed"] = isArmed;
   doc["isSirenActive"] = isSirenActive;
+  doc["isTriggered"] = isTriggered;
   doc["triggeringSectorId"] = triggeringSectorId;
   JsonArray sectors = doc["sectors"].to<JsonArray>();
   for (int i = 0; i < NUM_SECTORS; i++) {
@@ -165,9 +164,15 @@ void broadcastFullState() {
 }
 
 void sendTelegramAlert(String message) {
-  if (WiFi.status() == WL_CONNECTED) {
-    bot.sendMessage(CHAT_ID, message, "");
+  if (bot != nullptr && cfg.chatId[0] != '\0' && WiFi.status() == WL_CONNECTED) {
+    bot->sendMessage(cfg.chatId, message, "");
   }
+}
+
+// Estado do painel de alarme para o Home Assistant.
+const char* alarmStateStr() {
+  if (isTriggered) return "triggered";
+  return isArmed ? "armed_away" : "disarmed";
 }
 
 String readSensorStatus(int pin) {
@@ -193,6 +198,8 @@ void handleArmDisarm(bool arm) {
     Serial.printf("Sistema agora está: %s\n", isArmed ? "ARMADO" : "DESARMADO");
     updateHardwareState();
     if (!isArmed) {
+        // Desarmar limpa o disparo e silencia a sirene.
+        isTriggered = false;
         isSirenActive = false;
         triggeringSectorId = 0;
         updateSiren();
@@ -202,16 +209,26 @@ void handleArmDisarm(bool arm) {
 
 void handleActivateSiren() {
     isSirenActive = true;
+    sirenStartMs = millis();
     Serial.println("Sirene ativada via MQTT.");
     updateSiren();
     broadcastFullState();
 }
 
+// Silencia a sirene física, mas o alarme CONTINUA "triggered" até desarmar.
 void handleSilenceSiren() {
     isSirenActive = false;
-    triggeringSectorId = 0;
-    Serial.println("Sirene silenciada.");
+    Serial.println("Sirene silenciada (alarme segue disparado até desarmar).");
     updateSiren();
+    broadcastFullState();
+}
+
+// Liga/desliga o GATING da sirene (se a sirene física pode tocar no disparo).
+void handleSirenEnabled(bool enabled) {
+    cfg.sirenEnabled = enabled;
+    Storage::saveConfig(cfg);
+    Serial.printf("Sirene habilitada: %s\n", enabled ? "SIM" : "NAO");
+    if (!enabled && isSirenActive) { isSirenActive = false; updateSiren(); }
     broadcastFullState();
 }
 
@@ -233,12 +250,15 @@ void publishDiscoveryMessages() {
   doc["unique_id"] = "esp32_homeguard_alarm_panel";
   doc["state_topic"] = "homeguard/alarm/state";
   doc["command_topic"] = "homeguard/alarm/command";
+  doc["availability_topic"] = AVAILABILITY_TOPIC;
+  doc["payload_available"] = "online";
+  doc["payload_not_available"] = "offline";
   doc["payload_arm_away"] = "ARM_AWAY";
   doc["payload_disarm"] = "DISARM";
   // ATUALIZAÇÃO: Exige código apenas para desarmar.
   doc["code_arm_required"] = false;
   doc["code_disarm_required"] = true;
-  doc["code"] = HOME_ASSISTANT_PIN_CODE;
+  doc["code"] = cfg.haPin;
   JsonObject device_panel = doc["device"].to<JsonObject>();
   // CORREÇÃO FINAL: O Home Assistant exige que 'identifiers' seja um array.
   device_panel["identifiers"].add("esp32_homeguard_alarm");
@@ -260,6 +280,9 @@ void publishDiscoveryMessages() {
   doc["unique_id"] = "esp32_homeguard_siren";
   doc["state_topic"] = "homeguard/siren/state";
   doc["command_topic"] = "homeguard/siren/command"; // Usado para ativar (ON) ou silenciar (OFF)
+  doc["availability_topic"] = AVAILABILITY_TOPIC;
+  doc["payload_available"] = "online";
+  doc["payload_not_available"] = "offline";
   doc["payload_on"] = "ON";
   doc["payload_off"] = "OFF";
   doc["icon"] = "mdi:alarm-bell";
@@ -278,6 +301,34 @@ void publishDiscoveryMessages() {
     Serial.println("  -> ERRO ao publicar a descoberta da Sirene.");
   }
 
+  // --- Entidade: Switch "Sirene habilitada" (gating do disparo) ---
+  doc.clear();
+  doc["name"] = String(device_name) + " Sirene habilitada";
+  doc["unique_id"] = "esp32_homeguard_siren_enabled";
+  doc["state_topic"] = "homeguard/siren_enabled/state";
+  doc["command_topic"] = "homeguard/siren_enabled/command";
+  doc["availability_topic"] = AVAILABILITY_TOPIC;
+  doc["payload_available"] = "online";
+  doc["payload_not_available"] = "offline";
+  doc["payload_on"] = "ON";
+  doc["payload_off"] = "OFF";
+  doc["icon"] = "mdi:bell-cog";
+  doc["entity_category"] = "config";
+  {
+    JsonObject dev = doc["device"].to<JsonObject>();
+    dev["identifiers"].add("esp32_homeguard_alarm");
+    dev["name"] = device_name;
+    dev["manufacturer"] = "DIY";
+    dev["model"] = "ESP32";
+  }
+  serializeJson(doc, payload);
+  snprintf(topic, sizeof(topic), "homeassistant/switch/esp32_homeguard_siren_enabled/config");
+  if (mqttClient.publish(topic, payload, true)) {
+    Serial.println("  -> Publicação da descoberta da 'Sirene habilitada' OK.");
+  } else {
+    Serial.println("  -> ERRO ao publicar a descoberta da 'Sirene habilitada'.");
+  }
+
   // --- Entidades: Sensores Binários (Setores) ---
   for (int i = 0; i < NUM_SECTORS; i++) {
     doc.clear();
@@ -288,6 +339,9 @@ void publishDiscoveryMessages() {
     char state_topic[64];
     snprintf(state_topic, sizeof(state_topic), "homeguard/sector/%d/state", i + 1);
     doc["state_topic"] = state_topic;
+    doc["availability_topic"] = AVAILABILITY_TOPIC;
+    doc["payload_available"] = "online";
+    doc["payload_not_available"] = "offline";
     doc["payload_on"] = "Aberto";
     doc["payload_off"] = "Fechado";
     doc["device_class"] = "door";
@@ -311,17 +365,25 @@ void publishDiscoveryMessages() {
 
 
 void publishFullMqttState() {
-  // Publica estado do alarme
-  mqttClient.publish("homeguard/alarm/state", isArmed ? "armed_away" : "disarmed", true);
+  // Publica estado do alarme (disarmed / armed_away / triggered)
+  mqttClient.publish("homeguard/alarm/state", alarmStateStr(), true);
 
-  // Publica estado da sirene
+  // Publica estado da sirene física e do gating
   mqttClient.publish("homeguard/siren/state", isSirenActive ? "ON" : "OFF", true);
+  mqttClient.publish("homeguard/siren_enabled/state", cfg.sirenEnabled ? "ON" : "OFF", true);
 
   // Publica estado de cada setor
   for (int i = 0; i < NUM_SECTORS; i++) {
     char topic[64];
     snprintf(topic, sizeof(topic), "homeguard/sector/%d/state", i + 1);
     mqttClient.publish(topic, sector_status[i].c_str(), true);
+  }
+}
+
+// Publica a LISTA de senhas (apenas rótulos + tamanho, NUNCA os valores).
+void publishCodesList() {
+  if (mqttClient.connected()) {
+    mqttClient.publish("homeguard/codes/list", Codes::listJson().c_str(), true);
   }
 }
 
@@ -346,19 +408,47 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     } else if (strcmp(message, "ON") == 0) { // Usado para ativar a sirene
       handleActivateSiren();
     }
+  } else if (strcmp(topic, "homeguard/siren_enabled/command") == 0) {
+    handleSirenEnabled(strcmp(message, "ON") == 0);
+  } else if (strcmp(topic, "homeguard/codes/set") == 0) {
+    // Cadastro REMOTO de senha: {"action":"add"|"remove","code":"1234","label":"Gui"}
+    JsonDocument cmd;
+    if (!deserializeJson(cmd, message)) {
+      const char* action = cmd["action"] | "";
+      const char* code   = cmd["code"]   | "";
+      const char* label  = cmd["label"]  | "remoto";
+      bool ok = false;
+      if (strcmp(action, "add") == 0)    ok = Codes::add(String(code), label);
+      else if (strcmp(action, "remove") == 0) ok = Codes::remove(String(code));
+      Serial.printf("[CODES] %s '%s' -> %s\n", action, code, ok ? "OK" : "FALHOU");
+      publishCodesList();
+    }
+  } else if (strcmp(topic, "homeguard/system/command") == 0) {
+    if (strcmp(message, "reboot") == 0) {
+      Serial.println("[SYS] Reboot solicitado via MQTT."); delay(200); ESP.restart();
+    } else if (strcmp(message, "factory_reset") == 0) {
+      Serial.println("[SYS] FACTORY RESET via MQTT."); Storage::clearAll(); delay(200); ESP.restart();
+    }
   }
 }
 
 void reconnectMqtt() {
   if (!mqttClient.connected()) {
     Serial.print("Tentando conexão MQTT...");
-    if (mqttClient.connect(device_name, mqtt_user, mqtt_password)) {
+    // Last Will: se o ESP cair, o broker publica "offline" → entidades ficam unavailable.
+    if (mqttClient.connect(device_name, cfg.mqttUser, cfg.mqttPass,
+                           AVAILABILITY_TOPIC, 0, true, "offline")) {
       Serial.println("Conectado!");
+      mqttClient.publish(AVAILABILITY_TOPIC, "online", true); // ficou online
       publishDiscoveryMessages();
       publishFullMqttState();
+      publishCodesList();
       // Subscreve aos tópicos de comando
       mqttClient.subscribe("homeguard/alarm/command");
       mqttClient.subscribe("homeguard/siren/command");
+      mqttClient.subscribe("homeguard/siren_enabled/command");
+      mqttClient.subscribe("homeguard/codes/set");
+      mqttClient.subscribe("homeguard/system/command");
     } else {
       Serial.print("Falhou, rc=");
       Serial.print(mqttClient.state());
@@ -382,10 +472,19 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsE
       JsonDocument doc;
       deserializeJson(doc, (char*)data, len);
       const char* command = doc["command"];
+      if (command == nullptr) return;
       if (strcmp(command, "toggleArm") == 0) {
         handleArmDisarm(!isArmed);
       } else if (strcmp(command, "silenceSiren") == 0) {
         handleSilenceSiren();
+      } else if (strcmp(command, "setSirenEnabled") == 0) {
+        handleSirenEnabled(doc["value"] | true);
+      } else if (strcmp(command, "addCode") == 0) {
+        const char* c = doc["code"]; const char* l = doc["label"] | "web";
+        if (c) { Codes::add(String(c), l); publishCodesList(); }
+      } else if (strcmp(command, "removeCode") == 0) {
+        const char* c = doc["code"];
+        if (c) { Codes::remove(String(c)); publishCodesList(); }
       }
     }
   }
@@ -394,9 +493,45 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsE
 // =================================================================
 // 7. SETUP
 // =================================================================
+
+// Abre o portal de configuração (hotspot) e NÃO retorna — reinicia ao salvar.
+void runProvisioningPortal() {
+  Serial.println("[PROV] Sem configuracao valida — abrindo portal (AP Homeguard-XXXX).");
+  Provisioning::begin();
+  while (!Provisioning::isDone()) {
+    Provisioning::handle();
+    delay(5);
+  }
+  Serial.println("[PROV] Salvo. Reiniciando...");
+  delay(800);
+  ESP.restart();
+}
+
+// Conecta no WiFi com timeout. Retorna false se não conseguir.
+bool connectWiFi(uint32_t timeoutMs) {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(cfg.ssid, cfg.wifiPass);
+  Serial.print("Conectando ao WiFi");
+  uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < timeoutMs) {
+    delay(400);
+    Serial.print(".");
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nConectado! IP: " + WiFi.localIP().toString());
+    return true;
+  }
+  Serial.println("\nFalha ao conectar no WiFi.");
+  return false;
+}
+
 void setup() {
   Serial.begin(115200);
   Serial.println("\n\nINICIALIZANDO FIRMWare ESP32 HOMEGUARD (COM MQTT)");
+
+  // Carrega configuração e senhas da NVS
+  cfg = Storage::loadConfig();
+  Codes::load();
 
   wiegand.begin(WIEGAND_D0_PIN, WIEGAND_D1_PIN);
 
@@ -417,17 +552,21 @@ void setup() {
       while(1);
   }
 
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
-  Serial.print("Conectando ao WiFi...");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+  // Sem configuração → portal hotspot (não retorna; reinicia ao salvar).
+  if (!cfg.configured) {
+    runProvisioningPortal();
   }
-  Serial.println("\nConectado! IP: " + WiFi.localIP().toString());
 
-  // --- MQTT Setup (NOVO) ---
-  mqttClient.setServer(mqtt_server, mqtt_port);
+  // Conecta no WiFi; se falhar (credencial errada/rede fora), cai no portal.
+  if (!connectWiFi(20000)) {
+    runProvisioningPortal();
+  }
+
+  // --- Telegram (token vem da config) ---
+  bot = new UniversalTelegramBot(cfg.botToken, secured_client);
+
+  // --- MQTT Setup ---
+  mqttClient.setServer(cfg.mqttHost, cfg.mqttPort);
   mqttClient.setCallback(mqttCallback);
   mqttClient.setBufferSize(2048); // AUMENTADO: Resolve falhas de publicação com payloads grandes.
 
@@ -465,34 +604,57 @@ void loop() {
 
 
   // --- LÓGICA TECLADO WIEGAND ---
+  // Protocolo:
+  //   <código válido> + #   -> arma/desarma
+  //   <código válido> + *   -> entra no MODO PROGRAMAÇÃO (cadastrar senha)
+  //   (no modo prog) <nova senha> + #  -> cadastra a nova senha
+  //   *                     -> cancela / sai do modo programação
   if (wiegand.available()) {
-    uint32_t key = wiegand.getCode(); 
+    uint32_t key = wiegand.getCode();
     lastKeypadInputTime = currentMillis;
 
-    if (key >= 0 && key <= 9) {
+    if (key <= 9) {
       keypadBuffer += String(key);
-    } 
+    }
     else if (key == 11) { // '#' (Enter)
-      bool isCodeValid = false;
-      for (int i = 0; i < NUM_MASTER_CODES; i++) {
-        if (keypadBuffer.equals(MASTER_CODES[i])) {
-          isCodeValid = true;
-          break;
+      if (keypadProgramMode) {
+        if (Codes::add(keypadBuffer, "teclado")) {
+          Serial.println("[CODES] Nova senha cadastrada pelo teclado.");
+          publishCodesList();
+        } else {
+          Serial.println("[CODES] Falha ao cadastrar (curta/duplicada/cheia).");
         }
-      }
-      if (isCodeValid) {
+        keypadProgramMode = false;
+      } else if (Codes::check(keypadBuffer)) {
         handleArmDisarm(!isArmed);
       }
       keypadBuffer = "";
-    } 
-    else if (key == 10) { // '*' (Cancelar)
+    }
+    else if (key == 10) { // '*'
+      if (!keypadProgramMode && Codes::check(keypadBuffer)) {
+        keypadProgramMode = true;   // código válido + * -> entra no cadastro
+        Serial.println("[CODES] Modo programacao: digite a NOVA senha e pressione #.");
+      } else {
+        keypadProgramMode = false;  // cancela / sai
+      }
       keypadBuffer = "";
     }
   }
 
-  // --- Timeout do Teclado ---
-  if (keypadBuffer.length() > 0 && (currentMillis - lastKeypadInputTime > keypadTimeout)) {
+  // --- Timeout do Teclado (também sai do modo programação) ---
+  if ((keypadBuffer.length() > 0 || keypadProgramMode) &&
+      (currentMillis - lastKeypadInputTime > keypadTimeout)) {
     keypadBuffer = "";
+    keypadProgramMode = false;
+  }
+
+  // --- AUTO-CORTE DA SIRENE (timeout) ---
+  if (isSirenActive && cfg.sirenTimeoutSec > 0 &&
+      (currentMillis - sirenStartMs > (unsigned long)cfg.sirenTimeoutSec * 1000UL)) {
+    isSirenActive = false;
+    updateSiren();
+    Serial.println("[SIREN] Auto-corte por timeout (alarme segue disparado ate desarmar).");
+    broadcastFullState();
   }
 
   // --- VERIFICA SENSORES ---
@@ -505,10 +667,16 @@ void loop() {
         stateChanged = true;
         last_sector_status[i] = sector_status[i];
         if (isArmed && sector_status[i] == "Aberto") {
-          if (!isSirenActive) {
-            isSirenActive = true;
+          if (!isTriggered) {
+            // Dispara o alarme (estado lógico) — independe da sirene física.
+            isTriggered = true;
             triggeringSectorId = i + 1;
-            updateSiren();
+            // Sirene física só toca se o gating permitir (cfg.sirenEnabled).
+            if (cfg.sirenEnabled) {
+              isSirenActive = true;
+              sirenStartMs = currentMillis;
+              updateSiren();
+            }
             char alertMessage[128];
             snprintf(alertMessage, sizeof(alertMessage), "🚨 *ALARME DISPARADO!* 🚨\nSetor violado: %s", sector_names[i]);
             sendTelegramAlert(alertMessage);
