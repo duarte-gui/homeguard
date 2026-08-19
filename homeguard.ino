@@ -61,7 +61,7 @@
 // --- Configuração: carregada da NVS (preenchida pelo portal hotspot) ---
 // Segredos NÃO ficam mais no código. Ver provisioning.* / storage.*
 Config cfg;
-const char* device_name = "ESP32 Homeguard"; // Nome que aparece no Home Assistant
+const char* device_name = "Homeguard"; // Nome que aparece no Home Assistant
 
 // --- Teclado Wiegand (senhas agora no módulo Codes / NVS) ---
 const int WIEGAND_D0_PIN = 18;
