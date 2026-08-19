@@ -142,20 +142,33 @@ No Arduino IDE ou VS Code com a extensão **Arduino** instalada:
   ```
   https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
   ```
-- Abra **Tools → Board → Boards Manager**, pesquise `esp32` e instale o pacote da **Espressif Systems** (versão 2.x recomendada).
+- Abra **Tools → Board → Boards Manager**, pesquise `esp32` e instale o pacote da **Espressif Systems** — série **3.x** (testado com 3.3.11).
+
+> A série 2.x não é mais publicada no índice da Espressif. O firmware usa a API do core 3.x.
 
 #### 2. Bibliotecas Arduino (instalar pelo Library Manager)
 
-| Biblioteca | Autor | Versão mínima |
+| Biblioteca | Autor | Versão testada |
 |---|---|---|
-| **ESPAsyncWebServer** | Me-No-Dev | qualquer |
-| **AsyncTCP** | Me-No-Dev | qualquer |
-| **ArduinoJson** | Benoit Blanchon | 7.x |
-| **UniversalTelegramBot** | Brian Lough | qualquer |
-| **PubSubClient** | Nick O'Leary | 2.8+ |
-| **LittleFS_esp32** | lorol | qualquer |
+| **ESP Async WebServer** | ESP32Async | 3.12.0 |
+| **Async TCP** | ESP32Async | 3.5.0 |
+| **ArduinoJson** | Benoit Blanchon | 7.4.3 |
+| **UniversalTelegramBot** | Brian Lough | 1.3.0 |
+| **PubSubClient** | Nick O'Leary | 2.8 |
 
-> **ESPAsyncWebServer** e **AsyncTCP** não estão no Library Manager oficial. Instale via `.zip` ou pelo gerenciador de bibliotecas da IDE (repositório: `https://github.com/me-no-dev/ESPAsyncWebServer`).
+> Use o fork **ESP32Async**, não o original do Me-No-Dev — este último não compila no core 3.x. Ambas estão no Library Manager oficial; o header continua sendo `ESPAsyncWebServer.h`, sem mudança no código.
+
+> **LittleFS não precisa de biblioteca.** Vem embutido no core 3.x — a antiga `LittleFS_esp32` (lorol) não é mais necessária.
+
+#### 2b. Instalação por linha de comando (alternativa)
+
+```bash
+arduino-cli config add board_manager.additional_urls \
+  https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+arduino-cli core update-index
+arduino-cli core install esp32:esp32@3.3.11
+arduino-cli lib install "ESP Async WebServer" "Async TCP" ArduinoJson PubSubClient UniversalTelegramBot
+```
 
 #### 3. Wiegand (local — não instalar)
 
@@ -167,14 +180,20 @@ No arquivo `.vscode/arduino.json` (criado pela extensão Arduino):
 
 ```json
 {
-  "board": "esp32:esp32:esp32",
-  "configuration": "FlashSize=4MB,PartitionScheme=default,CPUFreq=240,FlashMode=dio,FlashFreq=80,UploadSpeed=921600,DebugLevel=none",
+  "board": "esp32:esp32:esp32da",
+  "configuration": "PartitionScheme=huge_app,CPUFreq=240,FlashMode=qio,FlashFreq=80,FlashSize=4M,UploadSpeed=921600,LoopCore=1,EventsCore=1,DebugLevel=none,EraseFlash=none",
   "port": "/dev/ttyUSB0",
+  "programmer": "esp32:esptool",
   "sketch": "homeguard.ino"
 }
 ```
 
 > Ajuste `"port"` para a porta serial correta (`/dev/ttyUSB0` no Linux, `COM3` no Windows).
+
+**Sobre o `PartitionScheme=huge_app`:** no esquema `default` o firmware ocupa 91% da partição de app (1,19 MB de 1,31 MB), sem margem para crescer, porque metade da flash fica reservada para uma partição OTA que o projeto não usa. O `huge_app` (3 MB app / 1 MB SPIFFS) derruba o uso para 37% e ainda deixa ~900 KB de sistema de arquivos para uma interface de 172 KB. O custo é abrir mão de OTA — o deploy é sempre por serial via `flash.sh`.
+
+> No Linux, o usuário precisa estar no grupo `uucp` para acessar `/dev/ttyUSB0`:
+> `sudo usermod -aG uucp $USER` (é preciso relogar depois).
 
 ---
 
@@ -207,11 +226,13 @@ O script `flash.sh` automatiza todo o processo: faz o build da interface, cria a
 - **esptool** (incluído no pacote ESP32 do Arduino)
 - **mklittlefs** (incluído no pacote ESP32 do Arduino)
 
-Os caminhos das ferramentas estão configurados no início de `flash.sh` — ajuste se necessário:
+Ambas vêm junto com o pacote ESP32 e o `flash.sh` **detecta a versão instalada sozinho**, sob `$HOME/.arduino15`. Não é preciso editar caminho nenhum.
+
+Para apontar para uma instalação fora do padrão, exporte antes de rodar:
 
 ```bash
-ESP32_TOOLS_BASE_PATH="/home/usuario/.arduino15/packages/esp32/tools/esptool_py/5.0.0/"
-MKLIITLEFS_PATH="/home/usuario/.arduino15/packages/esp32/tools/mklittlefs/3.0.0-gnu12-dc7f933"
+export ESP32_TOOLS_BASE_PATH="/caminho/para/esptool_py/5.3.1/"   # com barra no final
+export MKLIITLEFS_PATH="/caminho/para/mklittlefs/4.0.2-db0513a"
 ```
 
 ### Uso

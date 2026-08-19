@@ -97,9 +97,13 @@ if [ ! -d "$DIST_DIR" ]; then
 fi
 
 
-# --- CAMINHOS ESTÁTICOS PARA AS FERRAMENTAS DO ESP32 ---
-ESP32_TOOLS_BASE_PATH="/home/tecnologia/.arduino15/packages/esp32/tools/esptool_py/5.0.0/"
-MKLIITLEFS_PATH="/home/tecnologia/.arduino15/packages/esp32/tools/mklittlefs/3.0.0-gnu12-dc7f933"
+# --- CAMINHOS DAS FERRAMENTAS DO ESP32 ---
+# Detecta automaticamente a versão instalada das ferramentas do ESP32.
+# Pode ser sobrescrito exportando ESP32_TOOLS_BASE_PATH / MKLIITLEFS_PATH antes de rodar.
+ESP32_PACKAGES_DIR="${ARDUINO15_DIR:-$HOME/.arduino15}/packages/esp32/tools"
+: "${ESP32_TOOLS_BASE_PATH:=$(ls -d "$ESP32_PACKAGES_DIR"/esptool_py/*/ 2>/dev/null | sort -V | tail -n 1)}"
+: "${MKLIITLEFS_PATH:=$(ls -d "$ESP32_PACKAGES_DIR"/mklittlefs/*/ 2>/dev/null | sort -V | tail -n 1)}"
+MKLIITLEFS_PATH="${MKLIITLEFS_PATH%/}"
 
 # Validação dos caminhos das ferramentas
 if [ ! -d "$ESP32_TOOLS_BASE_PATH" ]; then
