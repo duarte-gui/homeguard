@@ -11,7 +11,7 @@
             ],
             "intelliSenseMode": "gcc-x64",
             "includePath": [
-                "/home/tecnologia/Documents/Gui/Casa/homeguard",
+                "/home/tecnologia/Documents/Gui/homeguard",
                 "/home/tecnologia/.arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.5-b66b5448-v1/esp32/qio_qspi/include",
                 "/home/tecnologia/.arduino15/packages/esp32/hardware/esp32/3.3.0/cores/esp32",
                 "/home/tecnologia/.arduino15/packages/esp32/hardware/esp32/3.3.0/variants/esp32da",
