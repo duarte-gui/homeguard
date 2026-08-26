@@ -26,7 +26,8 @@ enum ConnLedState {
   CONN_LED_CONNECTING_WIFI, // amarelo piscando       — conectando ao Wi-Fi
   CONN_LED_MQTT_DOWN,       // roxo pisca-duplo       — Wi-Fi ok, MQTT/HA fora
   CONN_LED_ALL_OK,          // verde "respirando"     — tudo conectado
-  CONN_LED_TRIGGERED        // vermelho piscando rápido — alarme disparado
+  CONN_LED_TRIGGERED,       // vermelho piscando rápido — alarme disparado
+  CONN_LED_FACTORY_RESET_HOLD // branco piscando, acelera — segurando o botão de reset
 };
 
 struct Config {

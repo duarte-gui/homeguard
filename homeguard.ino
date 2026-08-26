@@ -84,6 +84,7 @@ const char* device_name = "Homeguard"; // Nome que aparece no Home Assistant
   const int SIREN_RELAY_PIN = 6;
   const int STATUS_LED_PIN = 7;
   const int GATE_LOCK_RELAY_PIN = 10;
+  const int FACTORY_RESET_BUTTON_PIN = 9; // botão BOOT já existente na placa
 #else
   // --- ESP32-WROOM-32 (padrão original) ---
   const int WIEGAND_D0_PIN = 18;
@@ -96,7 +97,14 @@ const char* device_name = "Homeguard"; // Nome que aparece no Home Assistant
   const int SIREN_RELAY_PIN = 4;
   const int STATUS_LED_PIN = 16;
   const int GATE_LOCK_RELAY_PIN = 17;
+  const int FACTORY_RESET_BUTTON_PIN = 0; // botão BOOT presente na maioria dos DevKits ESP32
 #endif
+
+// Tempo que o botão de reset físico precisa ficar pressionado para disparar
+// o factory reset — evita apertos acidentais. Mesmo efeito do reset por MQTT
+// ou pelo menu do teclado, só que sem precisar de senha: quem tem acesso
+// físico à placa consegue resetar (mesma lógica do botão "reset" de roteador).
+#define FACTORY_RESET_HOLD_MS 5000UL
 
 // --- Nomes dos Setores ---
 const char* sector_names[] = {
@@ -533,7 +541,7 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsE
 // OBS: assume-se que o LED embutido do seu clone está no mesmo pino do
 // LED_BUILTIN "simples" (GPIO8) — confira visualmente após gravar.
 #ifdef LED_BUILTIN
-void updateConnLed(ConnLedState state) {
+void updateConnLed(ConnLedState state, unsigned long progressMs) {
   static unsigned long lastToggle = 0;
   static bool blinkOn = false;
   unsigned long now = millis();
@@ -557,6 +565,14 @@ void updateConnLed(ConnLedState state) {
       if (now - lastToggle >= 120) { lastToggle = now; blinkOn = !blinkOn; }
       rgbLedWrite(LED_BUILTIN, blinkOn ? 120 : 0, 0, 0);
       break;
+    case CONN_LED_FACTORY_RESET_HOLD: {
+      // pisca branco, acelerando conforme se aproxima do tempo de segurar
+      unsigned long capped = progressMs < FACTORY_RESET_HOLD_MS ? progressMs : FACTORY_RESET_HOLD_MS;
+      unsigned long interval = map(capped, 0, FACTORY_RESET_HOLD_MS, 300, 60);
+      if (now - lastToggle >= interval) { lastToggle = now; blinkOn = !blinkOn; }
+      rgbLedWrite(LED_BUILTIN, blinkOn ? 100 : 0, blinkOn ? 100 : 0, blinkOn ? 100 : 0);
+      break;
+    }
     case CONN_LED_ALL_OK:
     default: {
       unsigned long t = now % 3000;
@@ -567,7 +583,7 @@ void updateConnLed(ConnLedState state) {
   }
 }
 #else
-inline void updateConnLed(ConnLedState) {}
+inline void updateConnLed(ConnLedState, unsigned long) {}
 #endif
 
 // =================================================================
@@ -580,7 +596,7 @@ void runProvisioningPortal() {
   Provisioning::begin();
   while (!Provisioning::isDone()) {
     Provisioning::handle();
-    updateConnLed(CONN_LED_PROVISIONING);
+    updateConnLed(CONN_LED_PROVISIONING, 0);
     delay(5);
   }
   Serial.println("[PROV] Salvo. Reiniciando...");
@@ -597,7 +613,7 @@ bool connectWiFi(uint32_t timeoutMs) {
   while (WiFi.status() != WL_CONNECTED && millis() - start < timeoutMs) {
     delay(400);
     Serial.print(".");
-    updateConnLed(CONN_LED_CONNECTING_WIFI);
+    updateConnLed(CONN_LED_CONNECTING_WIFI, 0);
   }
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("\nConectado! IP: " + WiFi.localIP().toString());
@@ -627,6 +643,7 @@ void setup() {
   digitalWrite(SIREN_RELAY_PIN, LOW);
   pinMode(STATUS_LED_PIN, OUTPUT);
   pinMode(GATE_LOCK_RELAY_PIN, OUTPUT);
+  pinMode(FACTORY_RESET_BUTTON_PIN, INPUT_PULLUP);
   updateHardwareState();
 
   if (!LittleFS.begin()) {
@@ -684,15 +701,34 @@ void loop() {
     }
   }
 
-  // --- LED RGB DE STATUS (conexão) ---
-  if (isTriggered) {
-    updateConnLed(CONN_LED_TRIGGERED);
-  } else if (WiFi.status() != WL_CONNECTED) {
-    updateConnLed(CONN_LED_CONNECTING_WIFI);
-  } else if (!mqttClient.connected()) {
-    updateConnLed(CONN_LED_MQTT_DOWN);
+  // --- BOTÃO FÍSICO DE RESET DE FÁBRICA (segurar ~5s) ---
+  static unsigned long resetHoldStart = 0;
+  bool resetButtonHeld = (digitalRead(FACTORY_RESET_BUTTON_PIN) == LOW);
+  if (resetButtonHeld) {
+    if (resetHoldStart == 0) resetHoldStart = currentMillis;
+    unsigned long held = currentMillis - resetHoldStart;
+    if (held >= FACTORY_RESET_HOLD_MS) {
+      Serial.println("[SYS] FACTORY RESET pelo botao fisico (segurou o BOOT).");
+      Storage::clearAll();
+      delay(300);
+      ESP.restart();
+    }
+    updateConnLed(CONN_LED_FACTORY_RESET_HOLD, held);
   } else {
-    updateConnLed(CONN_LED_ALL_OK);
+    resetHoldStart = 0;
+  }
+
+  // --- LED RGB DE STATUS (conexão) ---
+  if (!resetButtonHeld) {
+    if (isTriggered) {
+      updateConnLed(CONN_LED_TRIGGERED, 0);
+    } else if (WiFi.status() != WL_CONNECTED) {
+      updateConnLed(CONN_LED_CONNECTING_WIFI, 0);
+    } else if (!mqttClient.connected()) {
+      updateConnLed(CONN_LED_MQTT_DOWN, 0);
+    } else {
+      updateConnLed(CONN_LED_ALL_OK, 0);
+    }
   }
 
   // --- LÓGICA TECLADO WIEGAND ---
