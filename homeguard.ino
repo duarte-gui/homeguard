@@ -104,7 +104,7 @@ const char* device_name = "Homeguard"; // Nome que aparece no Home Assistant
 // o factory reset — evita apertos acidentais. Mesmo efeito do reset por MQTT
 // ou pelo menu do teclado, só que sem precisar de senha: quem tem acesso
 // físico à placa consegue resetar (mesma lógica do botão "reset" de roteador).
-#define FACTORY_RESET_HOLD_MS 5000UL
+#define FACTORY_RESET_HOLD_MS 15000UL
 
 // --- Nomes dos Setores ---
 const char* sector_names[] = {
