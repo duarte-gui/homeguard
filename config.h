@@ -17,6 +17,18 @@ struct KeypadCode {
   char label[HG_LABEL_LEN];
 };
 
+// Estados do LED RGB de status de conexão (ver homeguard.ino, updateConnLed).
+// Definido aqui (não no .ino) porque a geração automática de protótipos do
+// Arduino insere a declaração da função no topo do arquivo, antes de onde o
+// enum apareceria se ficasse no meio do .ino — e o tipo precisa já existir.
+enum ConnLedState {
+  CONN_LED_PROVISIONING,    // azul piscando rápido  — modo config (hotspot aberto)
+  CONN_LED_CONNECTING_WIFI, // amarelo piscando       — conectando ao Wi-Fi
+  CONN_LED_MQTT_DOWN,       // roxo pisca-duplo       — Wi-Fi ok, MQTT/HA fora
+  CONN_LED_ALL_OK,          // verde "respirando"     — tudo conectado
+  CONN_LED_TRIGGERED        // vermelho piscando rápido — alarme disparado
+};
+
 struct Config {
   // Rede
   char ssid[33];

@@ -63,19 +63,40 @@
 Config cfg;
 const char* device_name = "Homeguard"; // Nome que aparece no Home Assistant
 
-// --- Teclado Wiegand (senhas agora no módulo Codes / NVS) ---
-const int WIEGAND_D0_PIN = 18;
-const int WIEGAND_D1_PIN = 19;
-
 // --- Mapeamento de Pinos (GPIO) ---
-const int SECTOR_1_PIN = 13;
-const int SECTOR_2_PIN = 12;
-const int SECTOR_3_PIN = 14;
-const int SECTOR_4_PIN = 27;
-const int SECTOR_5_PIN = 26;
-const int SIREN_RELAY_PIN = 4;
-const int STATUS_LED_PIN = 16;
-const int GATE_LOCK_RELAY_PIN = 17;
+// Selecionado automaticamente pela placa escolhida na IDE (Tools > Board).
+// CONFIG_IDF_TARGET_ESP32C3 é definido pelo core quando o alvo é um ESP32-C3
+// (ex.: "ESP32C3 Dev Module" / "ESP32-C3 Super Mini").
+#if CONFIG_IDF_TARGET_ESP32C3
+  // --- ESP32-C3 Super Mini ---
+  // O C3 só expõe GPIO 0-10 e 20-21 (11-19 são flash/USB interno).
+  // GPIO 2, 8 e 9 são strapping pins de boot: evitados aqui para não travar
+  // o boot caso um sensor esteja "fechado" (nível baixo) ao ligar.
+  // GPIO 20/21 (UART0 RX/TX) só ficam livres com "USB CDC On Boot: Enabled"
+  // (já necessário no Super Mini, que não tem chip USB-serial dedicado).
+  const int WIEGAND_D0_PIN = 20;
+  const int WIEGAND_D1_PIN = 21;
+  const int SECTOR_1_PIN = 0;
+  const int SECTOR_2_PIN = 1;
+  const int SECTOR_3_PIN = 3;
+  const int SECTOR_4_PIN = 4;
+  const int SECTOR_5_PIN = 5;
+  const int SIREN_RELAY_PIN = 6;
+  const int STATUS_LED_PIN = 7;
+  const int GATE_LOCK_RELAY_PIN = 10;
+#else
+  // --- ESP32-WROOM-32 (padrão original) ---
+  const int WIEGAND_D0_PIN = 18;
+  const int WIEGAND_D1_PIN = 19;
+  const int SECTOR_1_PIN = 13;
+  const int SECTOR_2_PIN = 12;
+  const int SECTOR_3_PIN = 14;
+  const int SECTOR_4_PIN = 27;
+  const int SECTOR_5_PIN = 26;
+  const int SIREN_RELAY_PIN = 4;
+  const int STATUS_LED_PIN = 16;
+  const int GATE_LOCK_RELAY_PIN = 17;
+#endif
 
 // --- Nomes dos Setores ---
 const char* sector_names[] = {
@@ -503,6 +524,53 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsE
 }
 
 // =================================================================
+// 6b. LED RGB DE STATUS (conexão)
+// =================================================================
+// Placas com LED endereçável (WS2812) embutido no pino LED_BUILTIN — caso do
+// ESP32-C3 Super Mini (GPIO8) — sinalizam o estado da conexão por cor/padrão.
+// Em placas sem esse LED (ex.: WROOM-32 "cru", sem LED_BUILTIN definido), as
+// chamadas a updateConnLed() viram no-op e nada é compilado a mais.
+// OBS: assume-se que o LED embutido do seu clone está no mesmo pino do
+// LED_BUILTIN "simples" (GPIO8) — confira visualmente após gravar.
+#ifdef LED_BUILTIN
+void updateConnLed(ConnLedState state) {
+  static unsigned long lastToggle = 0;
+  static bool blinkOn = false;
+  unsigned long now = millis();
+
+  switch (state) {
+    case CONN_LED_PROVISIONING:
+      if (now - lastToggle >= 150) { lastToggle = now; blinkOn = !blinkOn; }
+      rgbLedWrite(LED_BUILTIN, 0, 0, blinkOn ? 80 : 0);
+      break;
+    case CONN_LED_CONNECTING_WIFI:
+      if (now - lastToggle >= 400) { lastToggle = now; blinkOn = !blinkOn; }
+      rgbLedWrite(LED_BUILTIN, blinkOn ? 80 : 0, blinkOn ? 55 : 0, 0);
+      break;
+    case CONN_LED_MQTT_DOWN: {
+      unsigned long t = now % 1600;
+      bool on = (t < 150) || (t >= 300 && t < 450);
+      rgbLedWrite(LED_BUILTIN, on ? 70 : 0, 0, on ? 90 : 0);
+      break;
+    }
+    case CONN_LED_TRIGGERED:
+      if (now - lastToggle >= 120) { lastToggle = now; blinkOn = !blinkOn; }
+      rgbLedWrite(LED_BUILTIN, blinkOn ? 120 : 0, 0, 0);
+      break;
+    case CONN_LED_ALL_OK:
+    default: {
+      unsigned long t = now % 3000;
+      uint8_t brightness = (t < 1500) ? map(t, 0, 1500, 5, 60) : map(t, 1500, 3000, 60, 5);
+      rgbLedWrite(LED_BUILTIN, 0, brightness, 0);
+      break;
+    }
+  }
+}
+#else
+inline void updateConnLed(ConnLedState) {}
+#endif
+
+// =================================================================
 // 7. SETUP
 // =================================================================
 
@@ -512,6 +580,7 @@ void runProvisioningPortal() {
   Provisioning::begin();
   while (!Provisioning::isDone()) {
     Provisioning::handle();
+    updateConnLed(CONN_LED_PROVISIONING);
     delay(5);
   }
   Serial.println("[PROV] Salvo. Reiniciando...");
@@ -528,6 +597,7 @@ bool connectWiFi(uint32_t timeoutMs) {
   while (WiFi.status() != WL_CONNECTED && millis() - start < timeoutMs) {
     delay(400);
     Serial.print(".");
+    updateConnLed(CONN_LED_CONNECTING_WIFI);
   }
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("\nConectado! IP: " + WiFi.localIP().toString());
@@ -614,6 +684,16 @@ void loop() {
     }
   }
 
+  // --- LED RGB DE STATUS (conexão) ---
+  if (isTriggered) {
+    updateConnLed(CONN_LED_TRIGGERED);
+  } else if (WiFi.status() != WL_CONNECTED) {
+    updateConnLed(CONN_LED_CONNECTING_WIFI);
+  } else if (!mqttClient.connected()) {
+    updateConnLed(CONN_LED_MQTT_DOWN);
+  } else {
+    updateConnLed(CONN_LED_ALL_OK);
+  }
 
   // --- LÓGICA TECLADO WIEGAND ---
   // '*' SEMPRE limpa os dígitos (função preservada). Com o buffer já vazio, cancela a programação.

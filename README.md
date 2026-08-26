@@ -55,7 +55,7 @@ Um código de **4 a 8 dígitos**. É a senha mais importante: além de armar/des
 
 | Componente | Observação |
 |---|---|
-| ESP32 (qualquer variante com 4 MB de flash) | Testado com ESP32-WROOM-32 |
+| ESP32 (qualquer variante com 4 MB de flash) | Testado com ESP32-WROOM-32 e ESP32-C3 Super Mini |
 | 5× sensor magnético (reed switch) | Um por setor |
 | 1× teclado Wiegand (D0/D1) | Para armar/desarmar fisicamente |
 | 1× módulo relé (sirene) | |
@@ -63,6 +63,12 @@ Um código de **4 a 8 dígitos**. É a senha mais importante: além de armar/des
 | 1× LED de status | |
 
 ### Mapeamento de Pinos
+
+O firmware detecta a placa em tempo de compilação (`CONFIG_IDF_TARGET_ESP32C3`, definido
+automaticamente pelo core ao selecionar uma placa C3) e usa o mapa de pinos correspondente —
+não precisa editar nada no código, só escolher a placa certa em **Tools → Board**.
+
+**ESP32-WROOM-32** (`esp32:esp32:esp32`):
 
 | GPIO | Função |
 |---|---|
@@ -76,6 +82,51 @@ Um código de **4 a 8 dígitos**. É a senha mais importante: além de armar/des
 | 17 | Relé Trava/Portão |
 | 18 | Wiegand D0 |
 | 19 | Wiegand D1 |
+
+**ESP32-C3 Super Mini** (`esp32:esp32:esp32c3`, placa "ESP32C3 Dev Module"):
+
+| GPIO | Função |
+|---|---|
+| 0 | Setor 1 — Portão Garagem |
+| 1 | Setor 2 — Presença Garagem |
+| 3 | Setor 3 — Portão Principal |
+| 4 | Setor 4 — Porta Gui |
+| 5 | Setor 5 — Porta Gu |
+| 6 | Relé Sirene |
+| 7 | LED de Status |
+| 10 | Relé Trava/Portão |
+| 20 | Wiegand D0 |
+| 21 | Wiegand D1 |
+
+> O C3 Super Mini só expõe GPIO 0-10 e 20-21 (11-19 são flash/USB interno). Os pinos 2, 8 e 9
+> são *strapping pins* de boot e foram evitados de propósito **como entrada** — um sensor que
+> fique em nível baixo ("Fechado") ao ligar o ESP nesses pinos pode impedir o boot normal.
+> (O GPIO 8 é usado como *saída* pelo LED RGB embutido — ver abaixo; isso é seguro porque
+> strapping só importa como entrada, no instante do boot/reset.)
+>
+> Nessa placa, selecione **Tools → USB CDC On Boot → Enabled** (ela não tem chip USB-serial
+> dedicado; é o que libera o GPIO 20/21, normalmente UART0, para uso como GPIO comum).
+
+> **Flash mode:** selecione **Tools → Flash Mode → DIO**, não QIO (o padrão da placa). Muitos
+> C3 Super Mini vêm com flash embutida da XMC, que é instável em modo QIO — o sintoma é o board
+> resetar sozinho em loop logo depois do boot (`rst:0x7 (TG0WDT_SYS_RST)` no monitor serial).
+> `flash.sh` já grava em DIO por padrão.
+
+### LED RGB de status (ESP32-C3 Super Mini)
+
+O LED endereçável embutido (GPIO8, `LED_BUILTIN`) mostra o estado da conexão sem precisar
+abrir o monitor serial:
+
+| Cor / padrão | Estado |
+|---|---|
+| 🔵 Azul piscando rápido | Não configurado — portal hotspot aberto, aguardando configuração |
+| 🟡 Amarelo piscando | Configurado, conectando ao Wi-Fi |
+| 🟣 Roxo pisca-duplo | Wi-Fi conectado, mas MQTT/Home Assistant fora do ar |
+| 🟢 Verde "respirando" | Tudo conectado — sistema pronto |
+| 🔴 Vermelho piscando rápido | Alarme disparado (`triggered`) |
+
+Em placas sem LED embutido (ex.: ESP32-WROOM-32 "cru", sem `LED_BUILTIN` definido) essa
+sinalização é automaticamente desativada — não precisa editar nada no código.
 
 > Os sensores usam `INPUT_PULLUP`. Estado **Aberto** = HIGH, **Fechado** = LOW.
 

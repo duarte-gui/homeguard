@@ -126,6 +126,34 @@ fi
 MKLITTLEFS="$MKLIITLEFS_PATH/mklittlefs"
 echo -e "mklittlefs sendo usado de: ${YELLOW}$MKLITTLEFS${NC}"
 
+# --- DETECÇÃO DO CHIP (ESP32 clássico x ESP32-C3/S2/S3/...) ---
+# O offset do bootloader e o --chip do esptool mudam conforme a família:
+# o ESP32 "clássico" (Xtensa) grava o bootloader em 0x1000; os chips mais
+# novos baseados em RISC-V/USB nativo (C3, C6, H2, S2, S3) gravam em 0x0.
+CHIP="esp32"
+BOOTLOADER_OFFSET="0x1000"
+BUILD_OPTIONS_JSON="${BUILD_DIR}/build.options.json"
+if [ -f "$BUILD_OPTIONS_JSON" ]; then
+    FQBN=$(grep -o '"fqbn"[[:space:]]*:[[:space:]]*"[^"]*"' "$BUILD_OPTIONS_JSON" | sed -E 's/.*"fqbn"[[:space:]]*:[[:space:]]*"([^"]*)"/\1/')
+    if [ -n "$FQBN" ]; then
+        echo -e "FQBN detectado em build.options.json: ${YELLOW}$FQBN${NC}"
+        for c in esp32c3 esp32c6 esp32h2 esp32s2 esp32s3; do
+            if [[ "$FQBN" == *":$c:"* || "$FQBN" == *":$c" ]]; then
+                CHIP="$c"
+                BOOTLOADER_OFFSET="0x0"
+                break
+            fi
+        done
+    fi
+fi
+echo -e "Chip alvo: ${YELLOW}$CHIP${NC} (bootloader em ${YELLOW}$BOOTLOADER_OFFSET${NC})"
+if [ "$CHIP" != "esp32" ]; then
+    echo -e "${YELLOW}Nota:${NC} chips dessa família (embutida XMC é comum no C3 Super Mini) podem"
+    echo -e "travar em boot com flash mode QIO. Este script já usa DIO por padrão — se"
+    echo -e "mesmo assim o board resetar sozinho (rst:0x7 / TG0WDT_SYS_RST no serial),"
+    echo -e "é esse o motivo."
+fi
+
 
 # --- PASSO 2: LER A TABELA DE PARTIÇÕES PARA OBTER ENDEREÇO E TAMANHO ---
 echo -e "\n${GREEN}--- Passo 2: Lendo a Tabela de Partições ---${NC}"
@@ -213,9 +241,9 @@ if [ ! -f "$BOOTLOADER_BIN" ] || [ ! -f "$PARTITIONS_BIN" ] || [ ! -f "$FIRMWARE
 fi
 
 # Grava tudo usando o offset dinâmico para a imagem LittleFS
-$ESPTOOL_CMD --chip esp32 --port $SERIAL_PORT --baud 921600 --before default-reset --after hard-reset write-flash \
+$ESPTOOL_CMD --chip $CHIP --port $SERIAL_PORT --baud 921600 --before default-reset --after hard-reset write-flash \
  -z --flash-mode dio --flash-freq 80m --flash-size 4MB \
- 0x1000 "$BOOTLOADER_BIN" \
+ $BOOTLOADER_OFFSET "$BOOTLOADER_BIN" \
  0x8000 "$PARTITIONS_BIN" \
  0xe000 "$BOOT_APP0_BIN" \
  0x10000 "$FIRMWARE_BIN" \
