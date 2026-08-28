@@ -85,6 +85,7 @@ const char* device_name = "Homeguard"; // Nome que aparece no Home Assistant
   const int STATUS_LED_PIN = 7;
   const int GATE_LOCK_RELAY_PIN = 10;
   const int FACTORY_RESET_BUTTON_PIN = 9; // botão BOOT já existente na placa
+  const int ALARM_LED_PIN = 2; // WS2812 externo (feedback armado/desarmado/sirene) — último GPIO livre
 #else
   // --- ESP32-WROOM-32 (padrão original) ---
   const int WIEGAND_D0_PIN = 18;
@@ -98,6 +99,7 @@ const char* device_name = "Homeguard"; // Nome que aparece no Home Assistant
   const int STATUS_LED_PIN = 16;
   const int GATE_LOCK_RELAY_PIN = 17;
   const int FACTORY_RESET_BUTTON_PIN = 0; // botão BOOT presente na maioria dos DevKits ESP32
+  const int ALARM_LED_PIN = 2; // WS2812 externo (feedback armado/desarmado/sirene)
 #endif
 
 // Tempo que o botão de reset físico precisa ficar pressionado para disparar
@@ -587,6 +589,31 @@ inline void updateConnLed(ConnLedState, unsigned long) {}
 #endif
 
 // =================================================================
+// 6c. LED RGB DE FEEDBACK DO ALARME (armado/desarmado/sirene)
+// =================================================================
+// WS2812 externo (ALARM_LED_PIN), dedicado a mostrar o estado do alarme —
+// papel diferente do LED de status de conexão acima (LED_BUILTIN).
+void updateAlarmLed(AlarmLedState state) {
+  static unsigned long lastToggle = 0;
+  static bool blinkOn = false;
+  unsigned long now = millis();
+
+  switch (state) {
+    case ALARM_LED_SIREN: // amarelo piscando — sirene tocando
+      if (now - lastToggle >= 300) { lastToggle = now; blinkOn = !blinkOn; }
+      rgbLedWrite(ALARM_LED_PIN, blinkOn ? 100 : 0, blinkOn ? 70 : 0, 0);
+      break;
+    case ALARM_LED_ARMED: // vermelho fixo — armado
+      rgbLedWrite(ALARM_LED_PIN, 80, 0, 0);
+      break;
+    case ALARM_LED_DISARMED: // verde fixo — desarmado
+    default:
+      rgbLedWrite(ALARM_LED_PIN, 0, 60, 0);
+      break;
+  }
+}
+
+// =================================================================
 // 7. SETUP
 // =================================================================
 
@@ -729,6 +756,15 @@ void loop() {
     } else {
       updateConnLed(CONN_LED_ALL_OK, 0);
     }
+  }
+
+  // --- LED RGB DE FEEDBACK DO ALARME (armado/desarmado/sirene) ---
+  if (isSirenActive) {
+    updateAlarmLed(ALARM_LED_SIREN);
+  } else if (isArmed) {
+    updateAlarmLed(ALARM_LED_ARMED);
+  } else {
+    updateAlarmLed(ALARM_LED_DISARMED);
   }
 
   // --- LÓGICA TECLADO WIEGAND ---

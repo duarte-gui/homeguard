@@ -30,6 +30,15 @@ enum ConnLedState {
   CONN_LED_FACTORY_RESET_HOLD // branco piscando, acelera — segurando o botão de reset
 };
 
+// Estados do LED RGB de feedback do alarme (ver homeguard.ino, updateAlarmLed).
+// Separado do ConnLedState acima: esse aqui mostra armado/desarmado/disparado,
+// não status de conexão — são dois LEDs físicos com papéis diferentes.
+enum AlarmLedState {
+  ALARM_LED_DISARMED, // verde fixo   — desarmado
+  ALARM_LED_ARMED,    // vermelho fixo — armado
+  ALARM_LED_SIREN      // amarelo piscando — sirene tocando (junto com ela)
+};
+
 struct Config {
   // Rede
   char ssid[33];
