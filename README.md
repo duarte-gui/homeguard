@@ -35,7 +35,7 @@ Um código de **4 a 8 dígitos**. É a senha mais importante: além de armar/des
 
 ## Funcionalidades
 
-- Monitoramento de **5 setores físicos** (sensores magnéticos de porta/janela)
+- Monitoramento de **4 setores físicos** (sensores magnéticos de porta/janela)
 - Interface web em tempo real via **WebSocket**
 - Armar/Desarmar pelo navegador, pelo **Home Assistant** ou pelo **teclado Wiegand**
 - **Sirene** acionada automaticamente ao detectar violação com o sistema armado
@@ -56,7 +56,7 @@ Um código de **4 a 8 dígitos**. É a senha mais importante: além de armar/des
 | Componente | Observação |
 |---|---|
 | ESP32-C3 com 4 MB de flash | Testado com ESP32-C3 QFN32 rev v0.4, flash embutida |
-| 5× sensor magnético (reed switch) | Um por setor |
+| 4× sensor magnético (reed switch) | Um por setor |
 | 1× teclado Wiegand (D0/D1) | Para armar/desarmar fisicamente |
 | 1× módulo relé (sirene) | |
 | 1× módulo relé (trava/portão) | Opcional |
@@ -70,7 +70,7 @@ Um código de **4 a 8 dígitos**. É a senha mais importante: além de armar/des
 | 1 | Setor 2 — Presença Garagem | |
 | 3 | Setor 3 — Portão Principal | |
 | 4 | Setor 4 — Porta Gui | |
-| 20 | Setor 5 — Porta Gu | UART0 RX — entrada no boot, seguro para sensor |
+| 20 | *(livre)* | Era o Setor 5, removido |
 | 5 | Relé Trava/Portão | |
 | 10 | Relé Sirene | |
 | 21 | LED de Status (externo) | UART0 TX — pisca durante o log de boot da ROM |
@@ -164,8 +164,19 @@ Na **primeira vez** (ou se o Wi-Fi salvo falhar), o ESP sobe um hotspot:
 4. Toque em **Salvar e Reiniciar**. O ESP grava tudo em NVS e conecta na sua rede.
 
 A configuração fica persistida (`Preferences`/NVS). Para **reconfigurar do zero** (factory
-reset), publique `factory_reset` no tópico MQTT `homeguard/system/command` (ou apague a NVS),
-e o portal volta a aparecer.
+reset) — o portal volta a aparecer — há três caminhos:
+
+- **Botão BOOT:** com a placa já ligada, segure o BOOT por **10 s**. O LED RGB pisca vermelho
+  durante a contagem (acelera perto do fim) e fica azul quando apaga. Soltar antes cancela.
+  Não segure o BOOT *ao ligar* a placa: isso põe o ESP32-C3 em modo de gravação.
+- **Teclado:** `#` → `<mestre> #` → `0` → `<mestre> #`.
+- **MQTT:** publique `factory_reset` em `homeguard/system/command`.
+
+O reset apaga **tudo** da NVS: Wi-Fi, MQTT, Telegram, senha mestre e as senhas do teclado.
+
+Os tópicos de comando nunca devem ser publicados com *retain*. O firmware apaga qualquer
+mensagem retida neles antes de se inscrever — sem isso, um `ON` retido na sirene a disparava
+em todo boot, e um `factory_reset` retido apagaria a configuração a cada reinício.
 
 ---
 
@@ -325,7 +336,6 @@ Após o ESP32 iniciar e conectar ao broker MQTT, as entidades são criadas autom
 | Presença Garagem | `binary_sensor` | `homeguard/sector/2/state` |
 | Portão Principal | `binary_sensor` | `homeguard/sector/3/state` |
 | Porta Gui | `binary_sensor` | `homeguard/sector/4/state` |
-| Porta Gu | `binary_sensor` | `homeguard/sector/5/state` |
 
 **Armar** não exige código. **Desarmar** exige o **PIN** definido no portal de configuração.
 Quando há violação com o sistema armado, o painel vai para `triggered` (mesmo que a sirene

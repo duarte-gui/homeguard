@@ -43,10 +43,15 @@ static const char PORTAL_HTML[] PROGMEM = R"rawhtml(
 <div class="card">
   <h2>Rede Wi-Fi</h2>
   <div id="net-list"><div id="scan-status">Buscando redes...</div></div>
+  <div id="manual-wrap" style="display:none">
+    <label>Nome exato da rede (SSID)</label>
+    <input id="manual-ssid" placeholder="MinhaRede" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <button type="button" onclick="useManual()">Usar esta rede</button>
+  </div>
   <div id="sel-wrap" style="display:none">
     <div id="sel-box" onclick="clearSel()"><span id="sel-name"></span><span style="color:#888">trocar &#x2715;</span></div>
-    <label>Senha do Wi-Fi</label>
-    <input id="pass" type="password" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;" autocomplete="new-password">
+    <label>Senha do Wi-Fi <span id="pass-tog" onclick="togglePass()" style="float:right;color:#4ade80;cursor:pointer">mostrar</span></label>
+    <input id="pass" type="password" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;" autocomplete="new-password" autocapitalize="off" autocorrect="off" spellcheck="false">
   </div>
 </div>
 
@@ -77,32 +82,82 @@ static const char PORTAL_HTML[] PROGMEM = R"rawhtml(
 <p id="msg"></p>
 
 <script>
-var selSSID='';
+var selSSID='', seen={};
 function rssiBar(r){return r>-55?'&#x2582;&#x2584;&#x2586;&#x2588;':r>-65?'&#x2582;&#x2584;&#x2586;':r>-75?'&#x2582;&#x2584;':'&#x2582;';}
 function escH(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
-function renderNets(nets){
-  var el=document.getElementById('net-list');
-  if(!nets.length){el.innerHTML='<div id="scan-status">Nenhuma rede. <span onclick="pollScan()" style="color:#4ade80;cursor:pointer">Tentar de novo</span></div>';return;}
+function row(html,sig,fn){
+  var d=document.createElement('div');d.className='net';
+  var a=document.createElement('span');a.innerHTML=html;
+  var b=document.createElement('span');b.className='net-sig';b.innerHTML=sig;
+  d.appendChild(a);d.appendChild(b);d.onclick=fn;return d;
+}
+// Acumula o que cada varredura encontrou. O rádio divide tempo com o hotspot,
+// entao uma rede fraca aparece numa passada e some na seguinte: sem acumular,
+// a lista fica piscando e a rede certa nunca da para clicar.
+function mergeNets(nets){
+  nets.forEach(function(n){ if(n.ssid) seen[n.ssid]=n; });
+  renderNets();
+}
+function renderNets(){
+  var el=document.getElementById('net-list'), arr=[];
+  for(var k in seen) arr.push(seen[k]);
+  arr.sort(function(a,b){return b.rssi-a.rssi;});
   el.innerHTML='';
-  nets.forEach(function(n){
-    var d=document.createElement('div');d.className='net';
-    d.innerHTML='<span>'+(n.open?'':'&#x1F512; ')+escH(n.ssid)+'</span><span class="net-sig">'+rssiBar(n.rssi)+'</span>';
-    d.onclick=function(){pickNet(n.ssid,n.open);};
-    el.appendChild(d);
+  if(!arr.length){
+    var s=document.createElement('div');s.id='scan-status';
+    s.textContent='Buscando redes...';el.appendChild(s);
+  }
+  arr.forEach(function(n){
+    el.appendChild(row((n.open?'':'&#x1F512; ')+escH(n.ssid),rssiBar(n.rssi),
+      function(){pickNet(n.ssid,n.open);}));
   });
+  el.appendChild(row('Outra rede ou oculta','digitar',askManual));
+  el.appendChild(row('Procurar de novo','&#x21bb;',function(){fetch('/scan?again=1');}));
 }
 function pickNet(s,open){selSSID=s;document.getElementById('net-list').style.display='none';
   document.getElementById('sel-name').textContent=s;document.getElementById('sel-wrap').style.display='block';
   document.getElementById('pass').placeholder=open?'Rede aberta':'••••••••';document.getElementById('pass').focus();}
 function clearSel(){selSSID='';document.getElementById('net-list').style.display='block';document.getElementById('sel-wrap').style.display='none';}
-function pollScan(){fetch('/scan').then(function(r){if(r.status===202){setTimeout(pollScan,2000);return null;}return r.json();})
-  .then(function(d){if(d)renderNets(d);}).catch(function(){setTimeout(pollScan,3000);});}
+function askManual(){
+  document.getElementById('net-list').style.display='none';
+  document.getElementById('manual-wrap').style.display='block';
+  document.getElementById('manual-ssid').focus();
+}
+function useManual(){
+  var s=document.getElementById('manual-ssid').value.trim();
+  if(!s){document.getElementById('manual-ssid').focus();return;}
+  document.getElementById('manual-wrap').style.display='none';
+  pickNet(s,false);
+}
+// Nunca para: cada volta junta o que a varredura nova achou. Antes a busca
+// encerrava na primeira resposta 200, entao uma varredura parcial (o caso comum,
+// porque a primeira roda enquanto o hotspot ainda esta subindo) virava definitiva.
+function pollScan(){
+  fetch('/scan')
+    .then(function(r){return r.status===202?null:r.json();})
+    .then(function(d){if(d)mergeNets(d);})
+    .catch(function(){})
+    .then(function(){setTimeout(pollScan,2500);});
+}
 function val(id){return document.getElementById(id).value.trim();}
+// O teclado do celular capitaliza a primeira letra e o autocorretor troca
+// palavras sem avisar: ver a senha antes de salvar evita o reason=15 no boot.
+function togglePass(){
+  var p=document.getElementById('pass'),t=document.getElementById('pass-tog');
+  if(p.type==='password'){p.type='text';t.textContent='ocultar';}
+  else{p.type='password';t.textContent='mostrar';}
+}
+var spaceWarned=false;
 function save(){
   var msg=document.getElementById('msg');
   if(!selSSID){msg.textContent='Selecione a rede Wi-Fi.';return;}
   if(!val('mqttHost')){msg.textContent='Informe o broker MQTT.';return;}
   if(val('master').length<4){msg.textContent='Defina a senha mestre (mín. 4 dígitos).';return;}
+  // Espaço no começo/fim é quase sempre acidente, mas pode ser de verdade: avisa
+  // uma vez e salva no segundo toque. A senha nunca é cortada automaticamente.
+  var pw=document.getElementById('pass').value;
+  if(pw!==pw.trim()&&!spaceWarned){spaceWarned=true;
+    msg.textContent='A senha do Wi-Fi começa ou termina com espaço. Confira e toque em Salvar de novo para manter assim.';return;}
   var d={ssid:selSSID,pass:document.getElementById('pass').value,
     mqttHost:val('mqttHost'),mqttPort:parseInt(val('mqttPort')||'1883'),
     mqttUser:val('mqttUser'),mqttPass:document.getElementById('mqttPass').value,
@@ -120,27 +175,70 @@ pollScan();
 </html>
 )rawhtml";
 
+// ── Lista de redes ────────────────────────────────────────────────
+// Montada ANTES de o softAP subir. Com o hotspot no ar e um celular associado a
+// ele, o radio fica presso ao canal do AP para servir esse cliente e a varredura
+// volta quase vazia — era por isso que o portal mostrava "Buscando redes..." para
+// sempre. Medido na bancada: em modo estacao puro, 9 a 16 redes; com o AP no ar
+// e o celular conectado, zero.
+struct ScanNet { String ssid; int32_t rssi; bool open; };
+static ScanNet g_nets[24];
+static int     g_netCount = 0;
+
+static void mergeScanResults(int n) {
+  const int cap = (int)(sizeof(g_nets) / sizeof(g_nets[0]));
+  for (int i = 0; i < n; i++) {
+    String ssid = WiFi.SSID(i);
+    if (ssid.isEmpty()) continue;           // oculta: so da para chegar digitando
+    int at = -1;
+    for (int j = 0; j < g_netCount; j++) if (g_nets[j].ssid == ssid) { at = j; break; }
+    if (at < 0) {
+      if (g_netCount >= cap) continue;
+      at = g_netCount++;
+      g_nets[at].ssid = ssid;
+    }
+    g_nets[at].rssi = WiFi.RSSI(i);
+    g_nets[at].open = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
+  }
+}
+
+// Duas passadas: uma varredura sozinha ja perde rede fraca. Acumulando, o que
+// aparece numa passada fica na lista. ~9 s no pior caso, antes do AP aparecer.
+static void scanBeforeAP() {
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true);
+  delay(200);
+  for (int round = 0; round < 2; round++) {
+    int n = WiFi.scanNetworks(false, true, false, 350);
+    if (n > 0) mergeScanResults(n);
+    WiFi.scanDelete();
+  }
+  Serial.printf("[PROV] varredura previa: %d redes\n", g_netCount);
+}
+
 // ── Handlers ──────────────────────────────────────────────────────
 static void handleRoot()   { server.send_P(200, "text/html", PORTAL_HTML); }
 static void handleRedirect(){ server.sendHeader("Location", "http://192.168.4.1/", true); server.send(302, "text/plain", ""); }
 
+// Serve a lista montada antes do AP. Um rescan pedido pelo usuario (?again=1)
+// roda assincrono e so pode ACRESCENTAR: com o celular no hotspot ele vem fraco,
+// entao substituir a lista por ele seria piorar.
 static void handleScan() {
   int n = WiFi.scanComplete();
-  if (n == WIFI_SCAN_RUNNING || n < 0) {
-    if (n != WIFI_SCAN_RUNNING) WiFi.scanNetworks(true);
-    server.send(202, "application/json", "{\"status\":\"scanning\"}");
-    return;
+  if (n >= 0) { mergeScanResults(n); WiFi.scanDelete(); }
+
+  if (server.hasArg("again") && n != WIFI_SCAN_RUNNING) {
+    WiFi.scanNetworks(true, true, false, 350);
   }
+
   JsonDocument doc;
   JsonArray arr = doc.to<JsonArray>();
-  for (int i = 0; i < n && i < 20; i++) {
+  for (int i = 0; i < g_netCount; i++) {
     JsonObject net = arr.add<JsonObject>();
-    net["ssid"] = WiFi.SSID(i);
-    net["rssi"] = WiFi.RSSI(i);
-    net["open"] = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
+    net["ssid"] = g_nets[i].ssid;
+    net["rssi"] = g_nets[i].rssi;
+    net["open"] = g_nets[i].open;
   }
-  WiFi.scanDelete();
-  WiFi.scanNetworks(true);
   String out; serializeJson(doc, out);
   server.send(200, "application/json", out);
 }
@@ -172,11 +270,14 @@ static void handleSave() {
 
 // ── API ───────────────────────────────────────────────────────────
 void Provisioning::begin() {
-  WiFi.mode(WIFI_AP_STA);  // STA p/ conseguir escanear redes
+  // Varre PRIMEIRO, com o radio livre. Depois sobe o hotspot. A ordem e o que
+  // faz a lista existir: depois do AP no ar, a varredura nao presta mais.
+  scanBeforeAP();
+
+  WiFi.mode(WIFI_AP_STA);
   String ap = "Homeguard-" + String((uint32_t)ESP.getEfuseMac(), HEX).substring(0, 4);
   ap.toUpperCase();
   WiFi.softAP(ap.c_str());
-  WiFi.scanNetworks(true);
   dns.start(53, "*", WiFi.softAPIP());
 
   server.on("/",     HTTP_GET,  handleRoot);

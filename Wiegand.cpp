@@ -76,8 +76,13 @@ void Wiegand::begin(uint8_t pinD0, uint8_t pinD1) {
     _pinD0 = pinD0;
     _pinD1 = pinD1;
     
-    pinMode(_pinD0, INPUT);
-	pinMode(_pinD1, INPUT);
+    // INPUT_PULLUP, nao INPUT: D0/D1 sao saidas de coletor aberto e quem as
+    // segura em nivel alto e um pull-up. Sem teclado ligado (bancada) ou com um
+    // teclado que nao traga o seu, os pinos flutuam, a interrupcao de borda de
+    // descida dispara com ruido sem parar e a tempestade de ISR mata a tarefa
+    // de Wi-Fi do C3 — o radio nem chega a tentar associar.
+    pinMode(_pinD0, INPUT_PULLUP);
+	pinMode(_pinD1, INPUT_PULLUP);
     
     attachInterrupt(digitalPinToInterrupt(_pinD0), ReadD0, FALLING);
 	attachInterrupt(digitalPinToInterrupt(_pinD1), ReadD1, FALLING);

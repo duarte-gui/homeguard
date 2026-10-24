@@ -27,7 +27,7 @@
  * - Comunicação MQTT para integração com Home Assistant (Arme/Desarme, Status dos Setores).
  * - Sincroniza o estado completo com todos os clientes (Web, HA, etc.).
  * - Recebe comandos da interface web e do Home Assistant.
- * - Monitora 5 setores físicos e aciona a lógica de alarme.
+ * - Monitora 4 setores físicos e aciona a lógica de alarme.
  * - Envia notificações de alerta para o Telegram.
  * - Lê senhas de um teclado Wiegand para armar/desarmar o sistema fisicamente.
  *
@@ -94,12 +94,13 @@ const char* HOSTNAME = "homeguard";
 //   GPIO 20 e 21 .... UART0 RX / TX      -> livres porque o Serial vai pelo USB
 //                                           (build com CDCOnBoot=cdc)
 //
-// Sobram exatamente 10 pinos utilizáveis, que é o que o projeto precisa.
+// GPIO 20 ficou livre: era o 5º setor, removido. O 21 continua sendo escrito pelo
+// firmware (liga/desliga conforme armado), mas não precisa de nada ligado nele —
+// o status em cores sai do pixel RGB pendurado na linha de dados do GPIO 8.
 const int SECTOR_1_PIN = 0;
 const int SECTOR_2_PIN = 1;
 const int SECTOR_3_PIN = 3;
 const int SECTOR_4_PIN = 4;
-const int SECTOR_5_PIN = 20;  // UART0 RX: entrada no boot, seguro p/ sensor
 const int GATE_LOCK_RELAY_PIN = 5;
 const int SIREN_RELAY_PIN = 10;
 const int STATUS_LED_PIN = 21; // UART0 TX: pisca durante o log de boot da ROM
@@ -109,17 +110,27 @@ const int STATUS_LED_PIN = 21; // UART0 TX: pisca durante o log de boot da ROM
 const int WIEGAND_D0_PIN = 6;
 const int WIEGAND_D1_PIN = 7;
 
+// --- Reset de fábrica pelo botão BOOT (GPIO 9, já com pull-up na placa) ---
+// Segurar 10 s com o sistema JÁ rodando. Segurar na energização não serve:
+// GPIO 9 em nível baixo no reset põe o C3 em modo de gravação.
+const int BOOT_BTN_PIN = 9;
+const unsigned long FACTORY_RESET_HOLD_MS = 10000;
+
 // --- Nomes dos Setores ---
 const char* sector_names[] = {
   "Portão Garagem", // Removido "Setor X" para nomes mais limpos no HA
   "Presença Garagem",
   "Portão Principal",
-  "Porta Gui",
-  "Porta Gu"
+  "Porta Gui"
 };
 
-const int NUM_SECTORS = 5;
-const int sector_pins[NUM_SECTORS] = {SECTOR_1_PIN, SECTOR_2_PIN, SECTOR_3_PIN, SECTOR_4_PIN, SECTOR_5_PIN};
+const int NUM_SECTORS = 4;
+const int sector_pins[NUM_SECTORS] = {SECTOR_1_PIN, SECTOR_2_PIN, SECTOR_3_PIN, SECTOR_4_PIN};
+
+// Setores já publicados no Home Assistant em versões anteriores. A configuração
+// de descoberta vai retida no broker, então tirar um setor do array não basta:
+// sem apagar o tópico, a entidade fica para sempre no HA marcada como indisponível.
+const int MAX_SECTORS_EVER = 8;
 
 // =================================================================
 // 3. OBJETOS GLOBAIS E VARIÁVEIS DE ESTADO
@@ -282,6 +293,37 @@ void updateHardwareState() {
     digitalWrite(STATUS_LED_PIN, HIGH);
     digitalWrite(GATE_LOCK_RELAY_PIN, LOW);
   }
+}
+
+// Reset de fábrica pelo botão. Devolve true enquanto o botão está pressionado,
+// para quem chama não sobrescrever o LED com o status normal durante a contagem.
+bool checkFactoryResetButton(unsigned long nowMs) {
+  static bool down = false;
+  static unsigned long pressedAt = 0;
+
+  if (digitalRead(BOOT_BTN_PIN) == HIGH) {
+    if (down) Serial.println("[RESET] BOOT solto antes de 10 s — cancelado.");
+    down = false;
+    return false;
+  }
+  if (!down) {
+    down = true;
+    pressedAt = nowMs;
+    Serial.println("[RESET] BOOT pressionado: segure 10 s para o reset de fábrica.");
+  }
+
+  unsigned long held = nowMs - pressedAt;
+  unsigned long period = held < 7000 ? 250 : 80;   // acelera perto do fim
+  if ((nowMs / period) % 2) rgbShow(0, 0, 0); else rgbShow(60, 0, 0);
+
+  if (held >= FACTORY_RESET_HOLD_MS) {
+    Serial.println("[RESET] FACTORY RESET pelo botão BOOT.");
+    rgbShow(0, 0, 60);              // azul fixo: apagou, vai subir no portal
+    Storage::clearAll();
+    delay(500);
+    ESP.restart();
+  }
+  return true;
 }
 
 void handleArmDisarm(bool arm) {
@@ -456,6 +498,14 @@ void publishDiscoveryMessages() {
         Serial.printf("  -> ERRO ao publicar a descoberta do Setor %d.\n", i + 1);
     }
   }
+  // --- Limpeza: apaga a descoberta de setores que não existem mais ---
+  // Payload vazio e retido = "esqueça esta entidade" para o Home Assistant.
+  for (int i = NUM_SECTORS; i < MAX_SECTORS_EVER; i++) {
+    char stale[64];
+    snprintf(stale, sizeof(stale), "homeassistant/binary_sensor/esp32_homeguard_sector_%d/config", i + 1);
+    mqttClient.publish(stale, "", true);
+  }
+
   Serial.println("--- Fim da publicação das mensagens de descoberta ---");
 }
 
@@ -491,6 +541,11 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   memcpy(message, payload, length);
   message[length] = '\0';
   Serial.println(message);
+
+  // Payload vazio é alguém apagando uma mensagem retida, não um comando. Sem
+  // este retorno, um vazio em siren_enabled/command DESABILITAVA a sirene
+  // ("não é ON" -> false).
+  if (length == 0) return;
 
   if (strcmp(topic, "homeguard/alarm/command") == 0) {
     if (strcmp(message, "ARM_AWAY") == 0) {
@@ -547,12 +602,23 @@ void reconnectMqtt() {
       publishDiscoveryMessages();
       publishFullMqttState();
       publishCodesList();
-      // Subscreve aos tópicos de comando
-      mqttClient.subscribe("homeguard/alarm/command");
-      mqttClient.subscribe("homeguard/siren/command");
-      mqttClient.subscribe("homeguard/siren_enabled/command");
-      mqttClient.subscribe("homeguard/codes/set");
-      mqttClient.subscribe("homeguard/system/command");
+      // Comando vale no instante em que é enviado, nunca depois. Uma mensagem
+      // RETIDA num tópico de comando é reentregue a cada (re)conexão: a sirene
+      // disparava sozinha em todo boot, e um "factory_reset" retido apagaria a
+      // configuração a cada reinício. Por isso cada tópico tem a retida apagada
+      // (payload vazio + retain) ANTES do subscribe. O MQTT processa em ordem
+      // dentro da mesma conexão, então o subscribe já não recebe nada velho.
+      static const char* const COMMAND_TOPICS[] = {
+        "homeguard/alarm/command",
+        "homeguard/siren/command",
+        "homeguard/siren_enabled/command",
+        "homeguard/codes/set",
+        "homeguard/system/command",
+      };
+      for (const char* t : COMMAND_TOPICS) {
+        mqttClient.publish(t, "", true);
+        mqttClient.subscribe(t);
+      }
     } else {
       Serial.print("Falhou, rc=");
       Serial.print(mqttClient.state());
@@ -600,11 +666,17 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsE
 
 // Abre o portal de configuração (hotspot) e NÃO retorna — reinicia ao salvar.
 void runProvisioningPortal() {
-  Serial.println("[PROV] Sem configuracao valida — abrindo portal (AP Homeguard-XXXX).");
+  // A mensagem precisa dizer QUAL dos dois casos e: sem config salva, ou config
+  // salva que nao conectou. Dizer sempre "sem configuracao" manda quem esta
+  // depurando investigar a NVS quando o problema e o Wi-Fi.
+  Serial.printf("[PROV] %s — abrindo portal.\n",
+                cfg.configured ? "Configuracao existe, mas o Wi-Fi nao conectou"
+                               : "Sem configuracao salva");
   Provisioning::begin();
   while (!Provisioning::isDone()) {
     Provisioning::handle();
-    rgbShow(0, 0, ((millis() / 600) % 2) ? 0 : 45);   // azul piscando
+    if (!checkFactoryResetButton(millis()))
+      rgbShow(0, 0, ((millis() / 600) % 2) ? 0 : 45);   // azul piscando
     delay(5);
   }
   Serial.println("[PROV] Salvo. Reiniciando...");
@@ -613,11 +685,24 @@ void runProvisioningPortal() {
 }
 
 // Conecta no WiFi com timeout. Retorna false se não conseguir.
+// Último motivo de desconexão informado pelo driver (0 = nenhum). É o número que
+// separa senha errada (15/204) de rede inexistente (201) de AP que nem respondeu.
+static volatile uint8_t lastWifiReason = 0;
+
 bool connectWiFi(uint32_t timeoutMs) {
-  WiFi.mode(WIFI_STA);
-  // Precisa vir ANTES do begin(): é o nome enviado ao servidor DHCP, e é o que
-  // aparece na lista de dispositivos do roteador.
+  static bool handlerSet = false;
+  if (!handlerSet) {
+    WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) {
+      lastWifiReason = info.wifi_sta_disconnected.reason;
+    }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+    handlerSet = true;
+  }
+
+  // Antes do mode(): no core 3.x o nome é aplicado quando a interface STA é
+  // criada. É o que vai para o DHCP e aparece na lista de clientes do roteador.
   WiFi.setHostname(HOSTNAME);
+  WiFi.mode(WIFI_STA);
+  lastWifiReason = 0;
   WiFi.begin(cfg.ssid, cfg.wifiPass);
   Serial.print("Conectando ao WiFi");
   uint32_t start = millis();
@@ -630,7 +715,30 @@ bool connectWiFi(uint32_t timeoutMs) {
                   WiFi.localIP().toString().c_str(), HOSTNAME);
     return true;
   }
-  Serial.println("\nFalha ao conectar no WiFi.");
+
+  // Sem isto, "Falha ao conectar" não distingue rede inexistente de senha errada
+  // de AP que recusa a placa — e o diagnóstico vira adivinhação. O código de
+  // motivo do driver é mais preciso que o status; o status só vale quando o
+  // driver não reportou motivo nenhum (o AP nem respondeu).
+  const char* motivo;
+  switch (lastWifiReason) {
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_HANDSHAKE_TIMEOUT:      motivo = "senha errada"; break;
+    case WIFI_REASON_AUTH_FAIL:              motivo = "autenticação recusada (senha errada ou modo de segurança)"; break;
+    case WIFI_REASON_NO_AP_FOUND:            motivo = "rede não encontrada (SSID errado, oculta ou só 5 GHz)"; break;
+    case WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY:
+                                             motivo = "a rede usa um modo de segurança que a placa não aceita"; break;
+    case WIFI_REASON_ASSOC_FAIL:             motivo = "o AP recusou a associação (filtro de MAC ou limite de clientes)"; break;
+    case WIFI_REASON_AUTH_EXPIRE:            motivo = "o AP não respondeu à autenticação (sinal fraco?)"; break;
+    default:
+      switch (WiFi.status()) {
+        case WL_NO_SSID_AVAIL: motivo = "rede não encontrada (SSID errado, oculta ou só 5 GHz)"; break;
+        case WL_IDLE_STATUS:   motivo = "o AP não respondeu à placa (filtro de MAC, PMF ou sinal fraco)"; break;
+        default:               motivo = "não completou a conexão dentro do tempo"; break;
+      }
+  }
+  Serial.printf("\nFalha ao conectar no WiFi \"%s\": %s (status=%d, reason=%d)\n",
+                cfg.ssid, motivo, (int)WiFi.status(), (int)lastWifiReason);
   return false;
 }
 
@@ -650,6 +758,7 @@ void setup() {
     sector_status[i] = last_sector_status[i];
   }
   
+  pinMode(BOOT_BTN_PIN, INPUT_PULLUP);
   pinMode(SIREN_RELAY_PIN, OUTPUT);
   digitalWrite(SIREN_RELAY_PIN, LOW);
   pinMode(STATUS_LED_PIN, OUTPUT);
@@ -713,7 +822,7 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
 
-  updateRgbLed(currentMillis);
+  if (!checkFactoryResetButton(currentMillis)) updateRgbLed(currentMillis);
 
   // --- LÓGICA MQTT (NOVO) ---
   if (WiFi.status() == WL_CONNECTED) {
