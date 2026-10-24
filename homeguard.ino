@@ -5,9 +5,18 @@
  * ====================================================================================
  * ESP32 Homeguard Firmware - Versão Final (AsyncWebSocket + LittleFS + Wiegand + MQTT)
  * ====================================================================================
+ *
+ * ALVO: ESP32-C3 (RISC-V, single core, 4MB de flash embutida).
+ * Compilar com o FQBN:
+ *   esp32:esp32:esp32c3:JTAGAdapter=default,CDCOnBoot=cdc,PartitionScheme=huge_app,
+ *   CPUFreq=160,FlashMode=qio,FlashFreq=80,FlashSize=4M,UploadSpeed=921600,
+ *   DebugLevel=none,EraseFlash=none,ZigbeeMode=default
+ * CDCOnBoot=cdc é OBRIGATÓRIO: o Serial precisa sair pelo USB porque os pinos
+ * da UART0 (GPIO 20/21) foram usados como GPIO. Ver o mapa de pinos abaixo.
+ * ====================================================================================
  * 
- * Este firmware foi atualizado para usar uma biblioteca Wiegand local (Wiegand.aga e
- * Wiegand.cepepe na mesma pasta do projeto), eliminando a necessidade de instalar
+ * Este firmware foi atualizado para usar uma biblioteca Wiegand local (Wiegand.h e
+ * Wiegand.cpp na mesma pasta do projeto), eliminando a necessidade de instalar
  * bibliotecas externas e resolvendo os problemas de compilação.
  *
  * NOVA FUNCIONALIDADE: Integração com Home Assistant via MQTT com Auto-Discovery.
@@ -31,7 +40,7 @@
  *    - LittleFS_esp32
  *    - PubSubClient by Nick O'Leary (NOVO)
  * 
- * 2. WIEGAND: Os arquivos Wiegand.aga e Wiegand.cepepe DEVEM estar na mesma pasta deste sketch.
+ * 2. WIEGAND: Os arquivos Wiegand.h e Wiegand.cpp DEVEM estar na mesma pasta deste sketch.
  * 
  * 3. CONFIGURAÇÕES ABAIXO:
  *    - Preencha as credenciais de Wi-Fi, Telegram e MQTT.
@@ -42,6 +51,7 @@
 // =================================================================
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <ESPmDNS.h>      // acesso por http://homeguard.local, sem depender do IP
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 #include <UniversalTelegramBot.h>
@@ -63,19 +73,41 @@
 Config cfg;
 const char* device_name = "ESP32 Homeguard"; // Nome que aparece no Home Assistant
 
-// --- Teclado Wiegand (senhas agora no módulo Codes / NVS) ---
-const int WIEGAND_D0_PIN = 18;
-const int WIEGAND_D1_PIN = 19;
+// Nome de rede da placa. Vira:
+//   - http://homeguard.local  (mDNS/Bonjour)
+//   - o hostname DHCP que aparece na lista de clientes do roteador
+const char* HOSTNAME = "homeguard";
 
-// --- Mapeamento de Pinos (GPIO) ---
-const int SECTOR_1_PIN = 13;
-const int SECTOR_2_PIN = 12;
-const int SECTOR_3_PIN = 14;
-const int SECTOR_4_PIN = 27;
-const int SECTOR_5_PIN = 26;
-const int SIREN_RELAY_PIN = 4;
-const int STATUS_LED_PIN = 16;
-const int GATE_LOCK_RELAY_PIN = 17;
+// --- Mapeamento de Pinos (GPIO) — ESP32-C3 ---
+//
+// Restrições do ESP32-C3 (QFN32, flash embutida) que ditam este mapa:
+//   GPIO 11 ......... VDD_SPI            -> inutilizável
+//   GPIO 12 a 17 .... flash SPI interna  -> inutilizáveis
+//   GPIO 18 e 19 .... USB D- / D+        -> reservados p/ o USB-Serial-JTAG
+//                                           (é por onde grava e sai o Serial)
+//   GPIO 2, 8, 9 .... strapping          -> precisam estar em nível ALTO no boot.
+//                                           Um setor FECHADO puxa o pino p/ GND
+//                                           (INPUT_PULLUP), então travaria o boot.
+//   GPIO 8 .......... LED RGB embutido   -> usado via rgbLedWrite(RGB_BUILTIN,...).
+//                                           É strapping, mas a própria devkit já o
+//                                           liga ao LED, então continua bootando.
+//   GPIO 20 e 21 .... UART0 RX / TX      -> livres porque o Serial vai pelo USB
+//                                           (build com CDCOnBoot=cdc)
+//
+// Sobram exatamente 10 pinos utilizáveis, que é o que o projeto precisa.
+const int SECTOR_1_PIN = 0;
+const int SECTOR_2_PIN = 1;
+const int SECTOR_3_PIN = 3;
+const int SECTOR_4_PIN = 4;
+const int SECTOR_5_PIN = 20;  // UART0 RX: entrada no boot, seguro p/ sensor
+const int GATE_LOCK_RELAY_PIN = 5;
+const int SIREN_RELAY_PIN = 10;
+const int STATUS_LED_PIN = 21; // UART0 TX: pisca durante o log de boot da ROM
+
+// --- Teclado Wiegand (senhas agora no módulo Codes / NVS) ---
+// D0/D1 saíram de 18/19 (que no C3 são as linhas do USB) para 6/7.
+const int WIEGAND_D0_PIN = 6;
+const int WIEGAND_D1_PIN = 7;
 
 // --- Nomes dos Setores ---
 const char* sector_names[] = {
@@ -106,6 +138,7 @@ PubSubClient mqttClient(wifiClient);
 bool isArmed = false;
 bool isSirenActive = false;
 bool isTriggered = false;            // alarme disparado (independe da sirene física)
+bool fsMounted = false;              // LittleFS montou? (só afeta a interface web)
 int triggeringSectorId = 0;
 unsigned long sirenStartMs = 0;      // p/ o auto-corte da sirene
 String sector_status[NUM_SECTORS];
@@ -195,6 +228,52 @@ void updateSiren() {
   digitalWrite(SIREN_RELAY_PIN, isSirenActive ? HIGH : LOW);
 }
 
+// =================================================================
+// LED RGB EMBUTIDO (GPIO 8) — complementa o LED externo do GPIO 21
+// =================================================================
+// O LED externo só distingue armado/desarmado. O RGB acrescenta os estados que
+// antes só apareciam no Serial: disparo, Wi-Fi caído e modo de configuração.
+//
+//   verde fraco ....... desarmado, tudo certo
+//   vermelho fixo ..... armado
+//   vermelho piscando . ALARME DISPARADO
+//   laranja piscando .. sem Wi-Fi
+//   azul piscando ..... portal de configuração aberto
+//
+// Brilho baixo de propósito: um WS2812 no máximo é ofuscante de perto.
+#ifdef RGB_BUILTIN
+// Só reescreve quando a cor muda — o rgbLedWrite() usa o RMT e não precisa ser
+// chamado a cada volta do loop.
+void rgbShow(uint8_t r, uint8_t g, uint8_t b) {
+  static int last = -1;
+  int now = (r << 16) | (g << 8) | b;
+  if (now == last) return;
+  last = now;
+  rgbLedWrite(RGB_BUILTIN, r, g, b);
+}
+
+void updateRgbLed(unsigned long nowMs) {
+  uint8_t r = 0, g = 0, b = 0;
+  unsigned long period = 0;   // 0 = cor fixa
+
+  if (isTriggered) {                              // prioridade máxima
+    r = 60; period = 300;
+  } else if (WiFi.status() != WL_CONNECTED) {
+    r = 45; g = 12; period = 1200;                // laranja
+  } else if (isArmed) {
+    r = 40;
+  } else {
+    g = 18;
+  }
+
+  if (period == 0) { rgbShow(r, g, b); return; }
+  if ((nowMs / period) % 2) rgbShow(0, 0, 0); else rgbShow(r, g, b);
+}
+#else
+void rgbShow(uint8_t, uint8_t, uint8_t) {}
+void updateRgbLed(unsigned long) {}
+#endif
+
 void updateHardwareState() {
   if (isArmed) {
     digitalWrite(STATUS_LED_PIN, LOW);
@@ -267,6 +346,11 @@ void publishDiscoveryMessages() {
   doc["payload_not_available"] = "offline";
   doc["payload_arm_away"] = "ARM_AWAY";
   doc["payload_disarm"] = "DISARM";
+  // O firmware só implementa ARM_AWAY (e DISARM, que é sempre suportado).
+  // Sem declarar isto, o Home Assistant assume TODOS os modos e mostra botões
+  // de "Casa", "Noite", "Férias" e "Bypass" que enviam comandos ignorados aqui.
+  JsonArray features = doc["supported_features"].to<JsonArray>();
+  features.add("arm_away");
   // ATUALIZAÇÃO: Exige código apenas para desarmar.
   doc["code_arm_required"] = false;
   doc["code_disarm_required"] = true;
@@ -447,8 +531,16 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 void reconnectMqtt() {
   if (!mqttClient.connected()) {
     Serial.print("Tentando conexão MQTT...");
+    // Client ID sem espaços (o padrão MQTT só garante [0-9a-zA-Z]) e único por placa.
+    char clientId[32];
+    snprintf(clientId, sizeof(clientId), "homeguard-%06lX",
+             (unsigned long)(ESP.getEfuseMac() & 0xFFFFFF));
+    // Broker anônimo: usuário/senha vazios precisam virar NULL. Passando "" o
+    // PubSubClient envia credenciais em branco e o broker recusa a conexão.
+    const char* mqttUser = cfg.mqttUser[0] ? cfg.mqttUser : nullptr;
+    const char* mqttPass = cfg.mqttPass[0] ? cfg.mqttPass : nullptr;
     // Last Will: se o ESP cair, o broker publica "offline" → entidades ficam unavailable.
-    if (mqttClient.connect(device_name, cfg.mqttUser, cfg.mqttPass,
+    if (mqttClient.connect(clientId, mqttUser, mqttPass,
                            AVAILABILITY_TOPIC, 0, true, "offline")) {
       Serial.println("Conectado!");
       mqttClient.publish(AVAILABILITY_TOPIC, "online", true); // ficou online
@@ -512,6 +604,7 @@ void runProvisioningPortal() {
   Provisioning::begin();
   while (!Provisioning::isDone()) {
     Provisioning::handle();
+    rgbShow(0, 0, ((millis() / 600) % 2) ? 0 : 45);   // azul piscando
     delay(5);
   }
   Serial.println("[PROV] Salvo. Reiniciando...");
@@ -522,6 +615,9 @@ void runProvisioningPortal() {
 // Conecta no WiFi com timeout. Retorna false se não conseguir.
 bool connectWiFi(uint32_t timeoutMs) {
   WiFi.mode(WIFI_STA);
+  // Precisa vir ANTES do begin(): é o nome enviado ao servidor DHCP, e é o que
+  // aparece na lista de dispositivos do roteador.
+  WiFi.setHostname(HOSTNAME);
   WiFi.begin(cfg.ssid, cfg.wifiPass);
   Serial.print("Conectando ao WiFi");
   uint32_t start = millis();
@@ -530,7 +626,8 @@ bool connectWiFi(uint32_t timeoutMs) {
     Serial.print(".");
   }
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nConectado! IP: " + WiFi.localIP().toString());
+    Serial.printf("\nConectado! IP: %s  |  http://%s.local\n",
+                  WiFi.localIP().toString().c_str(), HOSTNAME);
     return true;
   }
   Serial.println("\nFalha ao conectar no WiFi.");
@@ -558,10 +655,14 @@ void setup() {
   pinMode(STATUS_LED_PIN, OUTPUT);
   pinMode(GATE_LOCK_RELAY_PIN, OUTPUT);
   updateHardwareState();
+  rgbShow(0, 0, 0);   // apaga o RGB até o primeiro updateRgbLed()
 
-  if (!LittleFS.begin()) {
-      Serial.println("Falha ao montar LittleFS. O sistema será interrompido.");
-      while(1);
+  // O alarme (sensores, sirene, teclado, MQTT) não depende do LittleFS — só a
+  // interface web depende. O `while(1)` anterior estourava o watchdog e ainda
+  // deixava a casa sem alarme; agora só a página web fica indisponível.
+  fsMounted = LittleFS.begin();
+  if (!fsMounted) {
+    Serial.println("AVISO: falha ao montar LittleFS — interface web indisponivel. O alarme continua ativo.");
   }
 
   // Sem configuração → portal hotspot (não retorna; reinicia ao salvar).
@@ -582,14 +683,25 @@ void setup() {
   mqttClient.setCallback(mqttCallback);
   mqttClient.setBufferSize(2048); // AUMENTADO: Resolve falhas de publicação com payloads grandes.
 
+  // --- mDNS: permite acessar por http://homeguard.local em vez de decorar o IP ---
+  // (nativo em iOS/macOS, Windows 10+ e Linux com avahi; no Android é irregular)
+  if (MDNS.begin(HOSTNAME)) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.printf("mDNS ativo: http://%s.local\n", HOSTNAME);
+  } else {
+    Serial.println("AVISO: falha ao iniciar o mDNS — use o IP.");
+  }
+
   secured_client.setInsecure();
   ws.onEvent(onWebSocketEvent);
   server.addHandler(&ws);
 
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send(LittleFS, "/index.html", "text/html");
-  });
-  server.serveStatic("/", LittleFS, "/");
+  if (fsMounted) {
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+      request->send(LittleFS, "/index.html", "text/html");
+    });
+    server.serveStatic("/", LittleFS, "/");
+  }
   server.begin();
   
   Serial.println("Servidores Web e WebSocket iniciados. Sistema pronto.");
@@ -601,12 +713,15 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
 
+  updateRgbLed(currentMillis);
+
   // --- LÓGICA MQTT (NOVO) ---
   if (WiFi.status() == WL_CONNECTED) {
     if (!mqttClient.connected()) {
-      long now = millis();
-      if (now - lastMqttReconnectAttempt > 5000) {
-        lastMqttReconnectAttempt = now;
+      // currentMillis e' unsigned long: guardar millis() em `long` virava negativo
+      // depois de ~24,8 dias e travava a reconexao MQTT para sempre.
+      if (currentMillis - lastMqttReconnectAttempt > 5000) {
+        lastMqttReconnectAttempt = currentMillis;
         reconnectMqtt();
       }
     } else {
@@ -705,22 +820,23 @@ void loop() {
       if (sector_status[i] != last_sector_status[i]) {
         stateChanged = true;
         last_sector_status[i] = sector_status[i];
-        if (isArmed && sector_status[i] == "Aberto") {
-          if (!isTriggered) {
-            // Dispara o alarme (estado lógico) — independe da sirene física.
-            isTriggered = true;
-            triggeringSectorId = i + 1;
-            // Sirene física só toca se o gating permitir (cfg.sirenEnabled).
-            if (cfg.sirenEnabled) {
-              isSirenActive = true;
-              sirenStartMs = currentMillis;
-              updateSiren();
-            }
-            char alertMessage[128];
-            snprintf(alertMessage, sizeof(alertMessage), "🚨 *ALARME DISPARADO!* 🚨\nSetor violado: %s", sector_names[i]);
-            sendTelegramAlert(alertMessage);
-          }
+      }
+      // O disparo é avaliado pelo estado ATUAL, não só na transição: antes, um
+      // setor que já estava aberto na hora de armar nunca disparava o alarme.
+      if (isArmed && !isTriggered && sector_status[i] == "Aberto") {
+        // Dispara o alarme (estado lógico) — independe da sirene física.
+        isTriggered = true;
+        triggeringSectorId = i + 1;
+        stateChanged = true;
+        // Sirene física só toca se o gating permitir (cfg.sirenEnabled).
+        if (cfg.sirenEnabled) {
+          isSirenActive = true;
+          sirenStartMs = currentMillis;
+          updateSiren();
         }
+        char alertMessage[128];
+        snprintf(alertMessage, sizeof(alertMessage), "🚨 *ALARME DISPARADO!* 🚨\nSetor violado: %s", sector_names[i]);
+        sendTelegramAlert(alertMessage);
       }
     }
     if (stateChanged) {

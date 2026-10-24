@@ -55,7 +55,7 @@ Um código de **4 a 8 dígitos**. É a senha mais importante: além de armar/des
 
 | Componente | Observação |
 |---|---|
-| ESP32 (qualquer variante com 4 MB de flash) | Testado com ESP32-WROOM-32 |
+| ESP32-C3 com 4 MB de flash | Testado com ESP32-C3 QFN32 rev v0.4, flash embutida |
 | 5× sensor magnético (reed switch) | Um por setor |
 | 1× teclado Wiegand (D0/D1) | Para armar/desarmar fisicamente |
 | 1× módulo relé (sirene) | |
@@ -64,20 +64,59 @@ Um código de **4 a 8 dígitos**. É a senha mais importante: além de armar/des
 
 ### Mapeamento de Pinos
 
-| GPIO | Função |
-|---|---|
-| 13 | Setor 1 — Portão Garagem |
-| 12 | Setor 2 — Presença Garagem |
-| 14 | Setor 3 — Portão Principal |
-| 27 | Setor 4 — Porta Gui |
-| 26 | Setor 5 — Porta Gu |
-| 4 | Relé Sirene |
-| 16 | LED de Status |
-| 17 | Relé Trava/Portão |
-| 18 | Wiegand D0 |
-| 19 | Wiegand D1 |
+| GPIO | Função | Observação |
+|---|---|---|
+| 0 | Setor 1 — Portão Garagem | |
+| 1 | Setor 2 — Presença Garagem | |
+| 3 | Setor 3 — Portão Principal | |
+| 4 | Setor 4 — Porta Gui | |
+| 20 | Setor 5 — Porta Gu | UART0 RX — entrada no boot, seguro para sensor |
+| 5 | Relé Trava/Portão | |
+| 10 | Relé Sirene | |
+| 21 | LED de Status (externo) | UART0 TX — pisca durante o log de boot da ROM |
+| 8 | LED RGB embutido | Já vem soldado na devkit; strapping, mas não atrapalha |
+| 6 | Wiegand D0 | |
+| 7 | Wiegand D1 | |
 
 > Os sensores usam `INPUT_PULLUP`. Estado **Aberto** = HIGH, **Fechado** = LOW.
+
+**Por que este mapa e não outro.** O ESP32-C3 QFN32 com flash embutida tem pouquíssimo
+GPIO livre, e o projeto precisa de exatamente 10:
+
+| GPIO | Situação |
+|---|---|
+| 11 | `VDD_SPI` — inutilizável |
+| 12 a 17 | Flash SPI interna — inutilizáveis |
+| 18, 19 | USB D− / D+ do USB-Serial-JTAG — é por onde se grava e sai o Serial |
+| 2, 8, 9 | Strapping: precisam estar em nível ALTO no boot (o 8 é o LED RGB da placa) |
+| 20, 21 | UART0 RX/TX — livres porque o Serial vai pelo USB (`CDCOnBoot=cdc`) |
+
+Nenhum setor pode ficar em 2, 8 ou 9: com `INPUT_PULLUP`, um setor **fechado** puxa o
+pino para GND, e isso travaria o boot do chip.
+
+### LED RGB embutido
+
+O LED externo do GPIO 21 continua fazendo só armado/desarmado. O RGB da placa (GPIO 8,
+via `rgbLedWrite(RGB_BUILTIN, …)`) mostra os estados que antes só apareciam no Serial:
+
+| Cor | Significado |
+|---|---|
+| Verde fraco | Desarmado, tudo certo |
+| Vermelho fixo | Armado |
+| Vermelho piscando | **Alarme disparado** |
+| Laranja piscando | Sem Wi-Fi |
+| Azul piscando | Portal de configuração aberto |
+
+O brilho é baixo de propósito — um WS2812 no máximo é ofuscante de perto. O código está
+dentro de `#ifdef RGB_BUILTIN`, então continua compilando em placas sem LED RGB.
+
+> Cuidado se sua placa for uma **ESP32-C3 SuperMini** ou clone parecido: várias delas
+> trazem um LED simples (azul, ligado em nível baixo) no GPIO 8, e não um WS2812. Nesse
+> caso o `rgbLedWrite()` gera pulsos que o LED não entende, e ele só pisca sem sentido.
+
+> **Atenção aos relés.** Os GPIOs ficam flutuando durante os ~200 ms de boot, antes do
+> `pinMode()` rodar. Use módulos de relé cujo estado de repouso seja o desligado (ou um
+> resistor de pull-down na entrada), senão a trava do portão pode dar um pulso a cada reset.
 
 ---
 
@@ -180,20 +219,27 @@ No arquivo `.vscode/arduino.json` (criado pela extensão Arduino):
 
 ```json
 {
-  "board": "esp32:esp32:esp32da",
-  "configuration": "PartitionScheme=huge_app,CPUFreq=240,FlashMode=qio,FlashFreq=80,FlashSize=4M,UploadSpeed=921600,LoopCore=1,EventsCore=1,DebugLevel=none,EraseFlash=none",
-  "port": "/dev/ttyUSB0",
+  "board": "esp32:esp32:esp32c3",
+  "configuration": "JTAGAdapter=default,CDCOnBoot=cdc,PartitionScheme=huge_app,CPUFreq=160,FlashMode=qio,FlashFreq=80,FlashSize=4M,UploadSpeed=921600,DebugLevel=none,EraseFlash=none,ZigbeeMode=default",
+  "port": "/dev/ttyACM0",
   "programmer": "esp32:esptool",
   "sketch": "homeguard.ino"
 }
 ```
 
-> Ajuste `"port"` para a porta serial correta (`/dev/ttyUSB0` no Linux, `COM3` no Windows).
+> Ajuste `"port"` para a porta serial correta. O C3 usa USB nativo e aparece como
+> `/dev/ttyACM*` no Linux (`COM*` no Windows) — **não** `/dev/ttyUSB*`, que é de placas
+> com conversor CH340/CP210x. O caminho em `/dev/serial/by-id/` é estável e não muda
+> conforme a ordem de plugagem.
+
+> **`CDCOnBoot=cdc` é obrigatório.** Os pinos da UART0 (GPIO 20/21) foram usados como
+> GPIO, então o `Serial` precisa sair pelo USB. Com `CDCOnBoot=default` você não veria
+> log nenhum.
 
 **Sobre o `PartitionScheme=huge_app`:** no esquema `default` o firmware ocupa 91% da partição de app (1,19 MB de 1,31 MB), sem margem para crescer, porque metade da flash fica reservada para uma partição OTA que o projeto não usa. O `huge_app` (3 MB app / 1 MB SPIFFS) derruba o uso para 37% e ainda deixa ~900 KB de sistema de arquivos para uma interface de 172 KB. O custo é abrir mão de OTA — o deploy é sempre por serial via `flash.sh`.
 
-> No Linux, o usuário precisa estar no grupo `uucp` para acessar `/dev/ttyUSB0`:
-> `sudo usermod -aG uucp $USER` (é preciso relogar depois).
+> No Linux, o usuário precisa estar no grupo dono do device (`uucp` no Arch, `dialout`
+> no Debian/Ubuntu): `sudo usermod -aG uucp $USER` — é preciso relogar depois.
 
 ---
 
@@ -219,37 +265,50 @@ O build usa **Parcel** e gera arquivos otimizados com Tailwind CSS bundlado loca
 
 ## Deploy no ESP32
 
-O script `flash.sh` automatiza todo o processo: faz o build da interface, cria a imagem LittleFS e grava firmware + sistema de arquivos no ESP32 em uma única execução.
+O script `flash.sh` faz tudo em uma execução: descobre a porta, identifica o chip,
+compila, confere se o binário é daquele chip, faz o build da interface, monta a imagem
+LittleFS e grava.
 
 ### Pré-requisitos do script
 
-- **esptool** (incluído no pacote ESP32 do Arduino)
-- **mklittlefs** (incluído no pacote ESP32 do Arduino)
-
-Ambas vêm junto com o pacote ESP32 e o `flash.sh` **detecta a versão instalada sozinho**, sob `$HOME/.arduino15`. Não é preciso editar caminho nenhum.
+- **esptool** e **mklittlefs** — vêm no pacote ESP32 do Arduino; o script **detecta a
+  versão instalada sozinho** sob `$HOME/.arduino15`, sem editar caminho nenhum.
+- **Node.js e npm** — para o build da interface web.
+- **arduino-cli** — só é necessário se você não passar um diretório de build pronto.
 
 Para apontar para uma instalação fora do padrão, exporte antes de rodar:
 
 ```bash
-export ESP32_TOOLS_BASE_PATH="/caminho/para/esptool_py/5.3.1/"   # com barra no final
-export MKLIITLEFS_PATH="/caminho/para/mklittlefs/4.0.2-db0513a"
+export ESPTOOL_DIR="/caminho/para/esptool_py/5.3.1/"        # com barra no final
+export MKLITTLEFS_DIR="/caminho/para/mklittlefs/4.0.2-db0513a"
 ```
 
 ### Uso
 
-1. Compile o sketch na Arduino IDE/VS Code para gerar os binários (o diretório de build é exibido no output da compilação, ex: `/tmp/arduino_build_123456`).
-2. Execute o script na raiz do projeto:
-
 ```bash
-bash flash.sh /dev/ttyUSB0 /tmp/arduino_build_123456
+bash flash.sh                          # descobre a porta e compila sozinho
+bash flash.sh /dev/ttyACM0             # porta fixa, compila sozinho
+bash flash.sh /dev/ttyACM0 /tmp/build  # usa um build já pronto (ex.: da IDE)
 ```
 
-O script executa os seguintes passos automaticamente:
-1. `npm install` + `npm run build` na pasta `data/`
-2. Lê a tabela de partições para obter o endereço correto do LittleFS
-3. Cria a imagem `littlefs.bin` com `mklittlefs`
-4. Grava bootloader, firmware e sistema de arquivos via `esptool`
-5. Limpa os arquivos temporários
+O que ele faz, na ordem:
+
+1. **Descobre a porta** — prefere `/dev/serial/by-id/`, que é estável. Se houver mais de
+   uma placa conectada, ele lista e pede que você escolha. Se faltar permissão, ele diz
+   o grupo exato e o comando para corrigir.
+2. **Identifica o chip** perguntando ao próprio silício via `esptool`, e daí deriva o
+   offset do bootloader: **0x1000** no ESP32 e no S2, **0x0** em C3/C6/H2/S3/P4.
+3. **Compila** com o FQBN de `.vscode/arduino.json` — e **aborta** se a placa configurada
+   ali não for a que está no cabo.
+4. **Confere o binário**: lê o `chip_id` do cabeçalho da imagem (`esp_image_header_t`) e
+   compara com o chip detectado. Se não bater, não grava — em vez de deixar a placa sem
+   bootar.
+5. `npm install` + `npm run build` na pasta `data/`.
+6. Lê a tabela de partições do build para achar o offset e o tamanho reais do LittleFS.
+7. Grava bootloader, tabela de partições, `boot_app0`, firmware e sistema de arquivos,
+   com `--flash-mode/freq/size keep` (preserva o que o build gravou no cabeçalho, em vez
+   de chutar valores fixos).
+8. Limpa os temporários.
 
 ---
 
