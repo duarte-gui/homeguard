@@ -1,0 +1,10 @@
+# intermediários do roteamento e do DRC (regerados pelo rotear.py)
+*.dsn
+*.ses
+drc.json
+*-backups/
+fp-info-cache
+*.kicad_prl
+
+# o .gitignore da raiz ignora *.zip; este é o arquivo que vai para a fábrica
+!fabricacao/homeguard_gerber.zip

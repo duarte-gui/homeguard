@@ -1,0 +1,398 @@
+[
+  {
+    "ref": "J1",
+    "value": "Screw terminal 2P",
+    "desc": "12V power input",
+    "mpn": "KF128-5.08-2P",
+    "package": "THT 5.08mm",
+    "type": "THT",
+    "dnp": false
+  },
+  {
+    "ref": "J2",
+    "value": "Screw terminal 8P",
+    "desc": "Alarm zones 1-4 + common",
+    "mpn": "KF128-5.08-8P (or 2x KF128-5.08-4P)",
+    "package": "THT 5.08mm",
+    "type": "THT",
+    "dnp": false
+  },
+  {
+    "ref": "J3",
+    "value": "Screw terminal 4P",
+    "desc": "Wiegand keypad",
+    "mpn": "KF128-5.08-4P",
+    "package": "THT 5.08mm",
+    "type": "THT",
+    "dnp": false
+  },
+  {
+    "ref": "J4",
+    "value": "Screw terminal 3P",
+    "desc": "External RGB pixel",
+    "mpn": "KF128-5.08-3P",
+    "package": "THT 5.08mm",
+    "type": "THT",
+    "dnp": false
+  },
+  {
+    "ref": "J5",
+    "value": "Screw terminal 2P",
+    "desc": "Siren output (switched 12V)",
+    "mpn": "KF128-5.08-2P",
+    "package": "THT 5.08mm",
+    "type": "THT",
+    "dnp": false
+  },
+  {
+    "ref": "J6",
+    "value": "Screw terminal 2P",
+    "desc": "Lock output (switched 12V)",
+    "mpn": "KF128-5.08-2P",
+    "package": "THT 5.08mm",
+    "type": "THT",
+    "dnp": false
+  },
+  {
+    "ref": "J9",
+    "value": "Screw terminal 2P",
+    "desc": "Auxiliary 12V output (sensors)",
+    "mpn": "KF128-5.08-2P",
+    "package": "THT 5.08mm",
+    "type": "THT",
+    "dnp": false
+  },
+  {
+    "ref": "F1",
+    "value": "PTC 2A hold 16V",
+    "desc": "Resettable fuse",
+    "mpn": "Bourns MF-MSMF200/16X-2",
+    "package": "1812",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "D1",
+    "value": "SS54",
+    "desc": "Schottky 5A 40V, reverse polarity protection",
+    "mpn": "SS54",
+    "package": "SMA (DO-214AC)",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "C1",
+    "value": "10uF 25V X5R",
+    "desc": "Decoupling",
+    "mpn": "CL31A106KAHNNNE",
+    "package": "1206",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "R1",
+    "value": "4.7k 1%",
+    "desc": "LED resistor",
+    "mpn": "0805W8F4701T5E",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "D2",
+    "value": "LED green",
+    "desc": "Power indicator",
+    "mpn": "LTST-C171GKT",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "U2",
+    "value": "LM2596 module",
+    "desc": "12V->5V buck module - DO NOT PLACE, customer fits",
+    "mpn": "-",
+    "package": "Module 43x21mm",
+    "type": "THT",
+    "dnp": true
+  },
+  {
+    "ref": "D3",
+    "value": "SS14",
+    "desc": "Schottky 1A, USB/buck isolation",
+    "mpn": "SS14",
+    "package": "SMA (DO-214AC)",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "C2",
+    "value": "10uF 25V X5R",
+    "desc": "Decoupling",
+    "mpn": "CL31A106KAHNNNE",
+    "package": "1206",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "J7",
+    "value": "Female header 1x8",
+    "desc": "Socket for ESP32-C3 SuperMini (left row)",
+    "mpn": "PZ254V-11-08P",
+    "package": "THT 2.54mm straight",
+    "type": "THT",
+    "dnp": false
+  },
+  {
+    "ref": "J8",
+    "value": "Female header 1x8",
+    "desc": "Socket for ESP32-C3 SuperMini (right row)",
+    "mpn": "PZ254V-11-08P",
+    "package": "THT 2.54mm straight",
+    "type": "THT",
+    "dnp": false
+  },
+  {
+    "ref": "R10",
+    "value": "1k 1%",
+    "desc": "Zone input series",
+    "mpn": "0805W8F1001T5E",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "R20",
+    "value": "10k 1%",
+    "desc": "Zone pull-up",
+    "mpn": "0805W8F1002T5E",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "C10",
+    "value": "100nF 50V X7R",
+    "desc": "Decoupling/filter",
+    "mpn": "CL21B104KBCNNNC",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "R11",
+    "value": "1k 1%",
+    "desc": "Zone input series",
+    "mpn": "0805W8F1001T5E",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "R21",
+    "value": "10k 1%",
+    "desc": "Zone pull-up",
+    "mpn": "0805W8F1002T5E",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "C11",
+    "value": "100nF 50V X7R",
+    "desc": "Decoupling/filter",
+    "mpn": "CL21B104KBCNNNC",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "R12",
+    "value": "1k 1%",
+    "desc": "Zone input series",
+    "mpn": "0805W8F1001T5E",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "R22",
+    "value": "10k 1%",
+    "desc": "Zone pull-up",
+    "mpn": "0805W8F1002T5E",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "C12",
+    "value": "100nF 50V X7R",
+    "desc": "Decoupling/filter",
+    "mpn": "CL21B104KBCNNNC",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "R13",
+    "value": "1k 1%",
+    "desc": "Zone input series",
+    "mpn": "0805W8F1001T5E",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "R23",
+    "value": "10k 1%",
+    "desc": "Zone pull-up",
+    "mpn": "0805W8F1002T5E",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "C13",
+    "value": "100nF 50V X7R",
+    "desc": "Decoupling/filter",
+    "mpn": "CL21B104KBCNNNC",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "R30",
+    "value": "330R 1%",
+    "desc": "Pixel data series",
+    "mpn": "0805W8F3300T5E",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "C30",
+    "value": "100nF 50V X7R",
+    "desc": "Decoupling/filter",
+    "mpn": "CL21B104KBCNNNC",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "Q1",
+    "value": "AO3400A",
+    "desc": "N-MOSFET logic level 30V 5.7A",
+    "mpn": "AO3400A",
+    "package": "SOT-23",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "R41",
+    "value": "100R 1%",
+    "desc": "Gate resistor",
+    "mpn": "0805W8F1000T5E",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "R51",
+    "value": "100k 1%",
+    "desc": "Gate pull-down",
+    "mpn": "0805W8F1003T5E",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "D11",
+    "value": "SS34",
+    "desc": "Schottky 3A, flyback",
+    "mpn": "SS34",
+    "package": "SMA (DO-214AC)",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "R61",
+    "value": "2.2k 1%",
+    "desc": "LED resistor",
+    "mpn": "0805W8F2201T5E",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "D21",
+    "value": "LED red",
+    "desc": "Output indicator",
+    "mpn": "LTST-C171KRKT",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "Q2",
+    "value": "AO3400A",
+    "desc": "N-MOSFET logic level 30V 5.7A",
+    "mpn": "AO3400A",
+    "package": "SOT-23",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "R42",
+    "value": "100R 1%",
+    "desc": "Gate resistor",
+    "mpn": "0805W8F1000T5E",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "R52",
+    "value": "100k 1%",
+    "desc": "Gate pull-down",
+    "mpn": "0805W8F1003T5E",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "D12",
+    "value": "SS34",
+    "desc": "Schottky 3A, flyback",
+    "mpn": "SS34",
+    "package": "SMA (DO-214AC)",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "R62",
+    "value": "2.2k 1%",
+    "desc": "LED resistor",
+    "mpn": "0805W8F2201T5E",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "D22",
+    "value": "LED red",
+    "desc": "Output indicator",
+    "mpn": "LTST-C171KRKT",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  },
+  {
+    "ref": "C3",
+    "value": "100nF 50V X7R",
+    "desc": "Decoupling/filter",
+    "mpn": "CL21B104KBCNNNC",
+    "package": "0805",
+    "type": "SMD",
+    "dnp": false
+  }
+]
