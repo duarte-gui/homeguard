@@ -1,0 +1,30 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Serial: monitorar",
+            "detail": "Abre o monitor serial na primeira placa encontrada (Ctrl+C para sair)",
+            "type": "shell",
+            "command": "arduino-cli monitor -p \"$(ls /dev/serial/by-id/* 2>/dev/null | head -n1)\" -c baudrate=115200",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "focus": true,
+                "clear": true
+            }
+        },
+        {
+            "label": "Gravar na placa",
+            "detail": "flash.sh: detecta a placa, compila, confere o binario e grava",
+            "type": "shell",
+            "command": "bash flash.sh",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            }
+        }
+    ]
+}

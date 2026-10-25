@@ -1,0 +1,22 @@
+Item,Designator,Qty,Value,Manufacturer Part Number,Description,Package,Type
+1,"C1,C2",2,10uF 25V X5R,CL31A106KAHNNNE,Decoupling,1206,SMD
+2,"C3,C10,C11,C12,C13,C30",6,100nF 50V X7R,CL21B104KBCNNNC,Decoupling/filter,0805,SMD
+3,D1,1,SS54,SS54,"Schottky 5A 40V, reverse polarity protection",SMA (DO-214AC),SMD
+4,D2,1,LED green,LTST-C171GKT,Power indicator,0805,SMD
+5,D3,1,SS14,SS14,"Schottky 1A, USB/buck isolation",SMA (DO-214AC),SMD
+6,"D11,D12",2,SS34,SS34,"Schottky 3A, flyback",SMA (DO-214AC),SMD
+7,"D21,D22",2,LED red,LTST-C171KRKT,Output indicator,0805,SMD
+8,F1,1,PTC 2A hold 16V,Bourns MF-MSMF200/16X-2,Resettable fuse,1812,SMD
+9,"J1,J5,J6,J9",4,Screw terminal 2P,KF128-5.08-2P,12V power input; Siren output (switched 12V); Lock output (switched 12V); Auxiliary 12V output (sensors),THT 5.08mm,THT
+10,J2,1,Screw terminal 8P,KF128-5.08-8P (or 2x KF128-5.08-4P),Alarm zones 1-4 + common,THT 5.08mm,THT
+11,J3,1,Screw terminal 4P,KF128-5.08-4P,Wiegand keypad,THT 5.08mm,THT
+12,J4,1,Screw terminal 3P,KF128-5.08-3P,External RGB pixel,THT 5.08mm,THT
+13,"J7,J8",2,Female header 1x8,PZ254V-11-08P,Socket for ESP32-C3 SuperMini (left row); Socket for ESP32-C3 SuperMini (right row),THT 2.54mm straight,THT
+14,"Q1,Q2",2,AO3400A,AO3400A,N-MOSFET logic level 30V 5.7A,SOT-23,SMD
+15,R1,1,4.7k 1%,0805W8F4701T5E,LED resistor,0805,SMD
+16,"R10,R11,R12,R13",4,1k 1%,0805W8F1001T5E,Zone input series,0805,SMD
+17,"R20,R21,R22,R23",4,10k 1%,0805W8F1002T5E,Zone pull-up,0805,SMD
+18,R30,1,330R 1%,0805W8F3300T5E,Pixel data series,0805,SMD
+19,"R41,R42",2,100R 1%,0805W8F1000T5E,Gate resistor,0805,SMD
+20,"R51,R52",2,100k 1%,0805W8F1003T5E,Gate pull-down,0805,SMD
+21,"R61,R62",2,2.2k 1%,0805W8F2201T5E,LED resistor,0805,SMD
