@@ -30,6 +30,15 @@ struct KeypadCode {
   bool duress;                 // senha de pânico: desarma, mas avisa em silêncio
 };
 
+// Estado do alarme gravado na NVS, para voltar igual depois de uma queda de energia.
+struct ArmState {
+  bool armed;
+  uint8_t mode;        // ArmMode do .ino
+  uint8_t tempBypass;  // zonas inibidas até desarmar
+  uint8_t flags;       // bit 0 = disparado, bit 1 = contagem de entrada correndo
+  uint8_t zone;        // zona do disparo / da entrada (0..HG_ZONES-1)
+};
+
 struct Config {
   // Rede
   char ssid[33];

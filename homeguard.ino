@@ -225,8 +225,6 @@ const int MAX_SECTORS_EVER = 8;
 // =================================================================
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
-WiFiClientSecure secured_client;
-UniversalTelegramBot* bot = nullptr; // instanciado no setup, após carregar a config
 Wiegand wiegand;
 
 // --- MQTT (NOVO) ---
@@ -364,43 +362,98 @@ void broadcastFullState() {
   Serial.println("Estado enviado para os clientes: " + jsonState);
 }
 
-// (Re)cria o bot quando o token muda pela página de admin.
+// ---------------------------------------------------------------- Telegram
+// Numa tarefa própria. Cada envio é uma conexão TLS que pode levar segundos (e a
+// biblioteca insiste por até 8 s): no loop(), isso parava a leitura das zonas,
+// do teclado e as contagens. Aqui o loop() só põe a mensagem na fila.
+// Sem Wi-Fi ou sem internet, a mensagem espera na fila e sai quando der, com a
+// hora em que aconteceu.
+struct TgMsg { uint32_t client; uint32_t at; char text[320]; };  // client != 0: teste do admin
+struct TgResult { uint32_t client; bool ok; };
+QueueHandle_t tgQueue = nullptr, tgResults = nullptr;
+portMUX_TYPE tgMux = portMUX_INITIALIZER_UNLOCKED;
+char tgToken[64], tgChat[24];        // cópia da config para a tarefa
+volatile bool tgConfigChanged = true;
+
+// Chamado quando o token ou o chat mudam (só do loop()).
 void setupTelegram() {
-  delete bot;
-  bot = nullptr;
-  if (cfg.botToken[0] != '\0') bot = new UniversalTelegramBot(cfg.botToken, secured_client);
+  portENTER_CRITICAL(&tgMux);
+  strlcpy(tgToken, cfg.botToken, sizeof(tgToken));
+  strlcpy(tgChat, cfg.chatId, sizeof(tgChat));
+  tgConfigChanged = true;
+  portEXIT_CRITICAL(&tgMux);
 }
+
+bool telegramConfigured() { return cfg.botToken[0] && cfg.chatId[0]; }
 
 // O nome da central vai na primeira linha: com duas placas, dá para saber de qual veio.
-// Sem Wi-Fi, o aviso espera numa fila (com a hora em que aconteceu) e sai quando
-// a placa reconectar: um disparo durante a queda da rede não se perde.
-std::vector<String> pendingAlerts;
-const size_t MAX_PENDING_ALERTS = 10;
-
-bool sendTelegramAlert(const String& message) {
-  if (bot == nullptr || cfg.chatId[0] == '\0') return false;
-  if (WiFi.status() == WL_CONNECTED) {
-    return bot->sendMessage(cfg.chatId, String(devName()) + "\n" + message, "");
+bool sendTelegramAlert(const String& message, uint32_t replyTo = 0) {
+  if (!tgQueue || !telegramConfigured()) return false;
+  TgMsg m;
+  m.client = replyTo;
+  m.at = time(nullptr) > 1700000000 ? (uint32_t)time(nullptr) : 0;
+  strlcpy(m.text, (String(devName()) + "\n" + message).c_str(), sizeof(m.text));
+  if (xQueueSend(tgQueue, &m, 0) != pdTRUE) {      // fila cheia: sai o mais velho
+    TgMsg velho;
+    xQueueReceive(tgQueue, &velho, 0);
+    xQueueSend(tgQueue, &m, 0);
   }
-  String when;
-  struct tm t;
-  if (time(nullptr) > 1700000000 && getLocalTime(&t, 0)) {
-    char buf[24];
-    strftime(buf, sizeof(buf), " (%d/%m %H:%M)", &t);
-    when = buf;
-  }
-  if (pendingAlerts.size() >= MAX_PENDING_ALERTS) pendingAlerts.erase(pendingAlerts.begin());
-  pendingAlerts.push_back(message + when);
-  return false;
+  return true;
 }
 
-void flushPendingAlerts() {
-  if (pendingAlerts.empty() || bot == nullptr || cfg.chatId[0] == '\0') return;
-  std::vector<String> fila;
-  fila.swap(pendingAlerts);
-  for (const String& m : fila) {
-    bot->sendMessage(cfg.chatId, String(devName()) + "\n" + m + "\n(enviado com atraso: a placa estava sem Wi-Fi)", "");
+void telegramTask(void*) {
+  NetworkClientSecure tls;
+  tls.setInsecure();
+  tls.setHandshakeTimeout(10);       // o padrão é 120 s
+  tls.setTimeout(10000);
+  UniversalTelegramBot* tg = nullptr;
+  String chat;
+  TgMsg m;
+  for (;;) {
+    if (xQueueReceive(tgQueue, &m, portMAX_DELAY) != pdTRUE) continue;
+    bool sent = false;
+    for (int tentativa = 0; tentativa < 5 && !sent; tentativa++) {
+      // Aviso de verdade espera a rede voltar; o teste do admin responde já.
+      while (WiFi.status() != WL_CONNECTED && !m.client) vTaskDelay(pdMS_TO_TICKS(2000));
+      if (WiFi.status() != WL_CONNECTED) break;
+      if (tgConfigChanged) {
+        char token[64];
+        portENTER_CRITICAL(&tgMux);
+        strlcpy(token, tgToken, sizeof(token));
+        chat = tgChat;
+        tgConfigChanged = false;
+        portEXIT_CRITICAL(&tgMux);
+        delete tg;
+        tg = token[0] ? new UniversalTelegramBot(token, tls) : nullptr;
+      }
+      if (!tg || chat.isEmpty()) break;
+      String text = m.text;
+      // Atrasou mais de 1 min (rede fora): diz quando aconteceu.
+      if (m.at && time(nullptr) - (time_t)m.at > 60) {
+        time_t at = m.at;
+        struct tm t;
+        localtime_r(&at, &t);
+        char buf[48];
+        strftime(buf, sizeof(buf), "\n(aconteceu %d/%m às %H:%M)", &t);
+        text += buf;
+      }
+      sent = tg->sendMessage(chat, text, "");
+      if (!sent && !m.client) vTaskDelay(pdMS_TO_TICKS(5000UL * (tentativa + 1)));
+      if (m.client) break;
+    }
+    if (!sent) Serial.println("[TG] mensagem nao enviada");
+    if (m.client) {
+      TgResult r{m.client, sent};
+      xQueueSend(tgResults, &r, 0);
+    }
   }
+}
+
+void startTelegram() {
+  setupTelegram();
+  tgQueue = xQueueCreate(12, sizeof(TgMsg));
+  tgResults = xQueueCreate(4, sizeof(TgResult));
+  xTaskCreate(telegramTask, "telegram", 12288, nullptr, 1, nullptr);
 }
 
 // Estado do painel de alarme para o Home Assistant.
@@ -427,26 +480,48 @@ bool isOperatingCode(const String& c) {
 // senha de 4 dígitos, isso leva o chute por força bruta de minutos para dias.
 // Teclado e web/HA têm contadores separados: alguém chutando senha pela rede
 // não pode travar o teclado do dono (e vice-versa).
+// A senha MESTRE tem um contador só dela: se um acerto de senha comum zerasse o
+// contador, quem tem uma senha de usuário intercalava 4 chutes da mestre com 1
+// desarme certo e nunca era bloqueado.
+// O limitador é usado também pelas rotas HTTP (outra tarefa): os contadores
+// mudam numa seção crítica, e o aviso (registro, Telegram, MQTT) sai no loop().
 const uint8_t AUTH_MAX_FAILS = 5;
 const unsigned long AUTH_LOCK_MS = 60000;
+portMUX_TYPE authMux = portMUX_INITIALIZER_UNLOCKED;
 
 struct AuthLimiter {
   const char* origem;
   uint8_t fails;
   unsigned long lockUntil;           // 0 = não bloqueado
+  volatile bool lockNotice;          // bloqueou: o loop() avisa
 
   long remainingMs() {
-    if (!lockUntil) return 0;
-    long r = (long)(lockUntil - millis());
-    if (r <= 0) { lockUntil = 0; return 0; }
+    portENTER_CRITICAL(&authMux);
+    long r = 0;
+    if (lockUntil) {
+      r = (long)(lockUntil - millis());
+      if (r <= 0) { lockUntil = 0; r = 0; }
+    }
+    portEXIT_CRITICAL(&authMux);
     return r;
   }
   void record(bool ok) {
-    if (ok) { fails = 0; return; }
-    if (++fails < AUTH_MAX_FAILS) return;
-    fails = 0;
-    lockUntil = millis() + AUTH_LOCK_MS;
-    if (!lockUntil) lockUntil = 1;
+    bool locked = false;
+    portENTER_CRITICAL(&authMux);
+    if (ok) fails = 0;
+    else if (++fails >= AUTH_MAX_FAILS) {
+      fails = 0;
+      lockUntil = millis() + AUTH_LOCK_MS;
+      if (!lockUntil) lockUntil = 1;
+      locked = true;
+    }
+    portEXIT_CRITICAL(&authMux);
+    if (locked) lockNotice = true;
+  }
+  // Só no loop().
+  void flushNotice() {
+    if (!lockNotice) return;
+    lockNotice = false;
     EventLog::add("5 senhas erradas (%s): bloqueado 60 s", origem);
     sendTelegramAlert(String("⚠️ 5 senhas erradas seguidas (") + origem + "). Novas tentativas bloqueadas por 1 minuto.");
     publishNotice("lockout", origem);
@@ -455,8 +530,17 @@ struct AuthLimiter {
     return "Muitas tentativas erradas. Tente de novo em " + String((remainingMs() + 999) / 1000) + " s.";
   }
 };
-AuthLimiter authRemote = {"web/HA", 0, 0};
-AuthLimiter authKeypad = {"teclado", 0, 0};
+AuthLimiter authRemote = {"web/HA", 0, 0, false};          // desarmar pela web e pelo HA
+AuthLimiter authKeypad = {"teclado", 0, 0, false};         // desarmar pelo teclado
+AuthLimiter authMaster = {"senha mestre", 0, 0, false};    // tudo que pede a mestre
+
+// Confere a mestre passando pelo limitador. "" = ok; senão, a mensagem de erro.
+String checkMaster(const String& code) {
+  if (authMaster.remainingMs() > 0) return authMaster.message();
+  bool ok = isMaster(code);
+  authMaster.record(ok);
+  return ok ? "" : "Senha mestre incorreta.";
+}
 
 // Quem usou a senha, para o registro: "Ana (teclado)".
 String whoUsed(const String& code, const char* origem) {
@@ -465,15 +549,34 @@ String whoUsed(const String& code, const char* origem) {
 }
 
 // ---------------------------------------------------------------- arme / desarme
-void saveArmState() { Storage::saveArmState(isArmed, armMode, tempBypass); }
+void saveArmState() {
+  ArmState st;
+  st.armed = isArmed;
+  st.mode = armMode;
+  st.tempBypass = tempBypass;
+  st.flags = (isTriggered ? 1 : 0) | (entryRunning ? 2 : 0);
+  st.zone = isTriggered && triggeringSectorId ? triggeringSectorId - 1 : entryZone;
+  Storage::saveArmState(st);
+}
 
-// Zonas instantâneas abertas que impedem armar neste modo. Zonas de entrada/saída
-// e seguidoras podem estar abertas: é por elas que se sai.
+// Vai ter contagem de saída? Só se houver zona de entrada/saída vigiada neste modo.
+bool exitDelayFor(ArmMode m) {
+  if (cfg.exitDelaySec == 0) return false;
+  for (int i = 0; i < NUM_SECTORS; i++)
+    if (cfg.zoneType[i] == ZT_DELAYED && !zoneBypassed(i) && (modeMask(m) & (1 << i))) return true;
+  return false;
+}
+
+// Zonas abertas que impedem armar neste modo. Com contagem de saída, entrada/saída
+// e seguidoras podem estar abertas (é por elas que se sai); sem ela, também
+// disparariam logo depois de armar, então contam.
 uint8_t blockingZones(ArmMode m) {
+  bool saida = exitDelayFor(m);
   uint8_t mask = 0;
   for (int i = 0; i < NUM_SECTORS; i++) {
-    if (cfg.zoneType[i] == ZT_INSTANT && zoneOpen(i) && !zoneBypassed(i) && (modeMask(m) & (1 << i)))
-      mask |= 1 << i;
+    if (!zoneOpen(i) || zoneBypassed(i) || !(modeMask(m) & (1 << i))) continue;
+    uint8_t t = cfg.zoneType[i];
+    if (t == ZT_INSTANT || (!saida && (t == ZT_DELAYED || t == ZT_FOLLOWER))) mask |= 1 << i;
   }
   return mask;
 }
@@ -481,7 +584,8 @@ uint8_t blockingZones(ArmMode m) {
 // Arma. Devolve as zonas abertas que impediram (0 = armou ou já estava armado).
 // force: arma mesmo assim, deixando essas zonas inibidas até desarmar.
 uint8_t armSystem(ArmMode m, bool force, const String& who) {
-  if (isArmed) return 0;
+  // Disparado (inclusive zona 24 h desarmada) só sai com senha, no desarme.
+  if (isArmed || isTriggered) return 0;
   uint8_t open = blockingZones(m);
   if (open && !force) return open;
 
@@ -491,11 +595,8 @@ uint8_t armSystem(ArmMode m, bool force, const String& who) {
   triggeringSectorId = 0;
   entryRunning = false;
   tempBypass = open;
-  bool hasEntryZone = false;
-  for (int i = 0; i < NUM_SECTORS; i++)
-    if (cfg.zoneType[i] == ZT_DELAYED && zoneActive(i, m)) hasEntryZone = true;
   // Sem zona de entrada/saída não há por onde sair: arma direto.
-  exitRunning = hasEntryZone && cfg.exitDelaySec > 0;
+  exitRunning = exitDelayFor(m);
   exitEndsAt = millis() + cfg.exitDelaySec * 1000UL;
 
   EventLog::add("Armado (%s) por %s", modeName(m), who.c_str());
@@ -535,6 +636,7 @@ void triggerAlarm(int i) {
     updateSiren();
   }
   EventLog::add("DISPARO: %s", zoneName(i));
+  saveArmState();                    // disparo continua depois de uma queda de energia
   sendTelegramAlert(String("🚨 ALARME DISPARADO 🚨\nZona: ") + zoneName(i));
 }
 
@@ -909,24 +1011,37 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   } else if (t == T("siren_enabled/command")) {
     handleSirenEnabled(strcmp(message, "ON") == 0);
   } else if (t == T("codes/set")) {
-    // Cadastro REMOTO de senha: {"action":"add"|"remove","code":"1234","label":"Gui"}
+    // Cadastro REMOTO de senha, só com a mestre:
+    //   {"action":"add"|"remove","code":"1234","label":"Gui","master":"..."}
+    // Sem ela, quem publicasse no broker criava uma senha e desarmava.
     JsonDocument cmd;
     if (!deserializeJson(cmd, message)) {
+      String erro = checkMaster(cmd["master"] | "");
       const char* action = cmd["action"] | "";
-      const char* code   = cmd["code"]   | "";
-      const char* label  = cmd["label"]  | "remoto";
+      String code = cmd["code"] | "";
+      const char* label = cmd["label"] | "remoto";
       bool ok = false;
-      if (strcmp(action, "add") == 0)    ok = Codes::add(String(code), label);
-      else if (strcmp(action, "remove") == 0) ok = Codes::remove(String(code));
+      if (erro.length()) EventLog::add("Senha por MQTT recusada: %s", erro.c_str());
+      else if (!strcmp(action, "add") && soDigitos(code) && code.length() >= 4 && code.length() <= 8 && !isMaster(code))
+        ok = Codes::add(code, label);
+      else if (!strcmp(action, "remove")) ok = Codes::remove(code);
       if (ok) EventLog::add("Senha %s por MQTT: %s", action, label);
       publishCodesList();
     }
   } else if (t == T("system/command")) {
-    if (strcmp(message, "reboot") == 0) {
+    JsonDocument cmd;
+    const char* action = message;
+    if (message[0] == '{' && !deserializeJson(cmd, message)) action = cmd["action"] | "";
+    if (strcmp(action, "reboot") == 0) {
       EventLog::add("Reinicio pedido pelo MQTT");
       delay(200); ESP.restart();
-    } else if (strcmp(message, "factory_reset") == 0) {
-      Serial.println("[SYS] FACTORY RESET via MQTT."); Storage::clearAll(); delay(200); ESP.restart();
+    } else if (strcmp(action, "factory_reset") == 0) {
+      // Apaga tudo e deixa a casa sem alarme até alguém configurar: só com a
+      // mestre, {"action":"factory_reset","master":"..."}.
+      String erro = checkMaster(cmd["master"] | "");
+      if (erro.length()) { EventLog::add("Reset de fabrica por MQTT recusado"); return; }
+      EventLog::add("RESET DE FABRICA pelo MQTT");
+      Storage::clearAll(); delay(200); ESP.restart();
     }
   }
 }
@@ -993,7 +1108,7 @@ void reconnectMqtt() {
 // O callback do WebSocket roda na tarefa do AsyncTCP. MQTT (PubSubClient),
 // Telegram e NVS não são seguros fora do loop(): o callback só enfileira o
 // texto do comando, e o loop() executa.
-struct WebCmd { uint32_t client; char json[640]; };
+struct WebCmd { uint32_t client; char json[1024]; };
 QueueHandle_t webCmdQueue = nullptr;
 
 // Sessão de admin presa à conexão WebSocket: some quando a página fecha ou
@@ -1281,7 +1396,9 @@ void handleWebCommand(uint32_t client, JsonDocument& doc) {
 
   // ---------------- livres ----------------
   if (!strcmp(c, "_bye")) { revokeAdmin(client); return; }
+  if (!strcmp(c, "_hello")) { ws.text(client, getFullStateJson()); return; }
   if (!strcmp(c, "arm") || !strcmp(c, "toggleArm")) {   // toggleArm: interface antiga, só arma
+    if (isTriggered) { wsReply(client, "arm", false, "O alarme está disparado: desarme com a senha antes de armar."); return; }
     if (isArmed) { wsReply(client, "arm", true); return; }
     uint8_t open = armSystem(parseMode(doc["mode"] | "away"), doc["force"] | false, "pagina web");
     if (!open) { wsReply(client, "arm", true); return; }
@@ -1309,11 +1426,12 @@ void handleWebCommand(uint32_t client, JsonDocument& doc) {
     return;
   }
   if (!strcmp(c, "adminLogin")) {
-    if (authRemote.remainingMs() > 0) { wsReply(client, c, false, authRemote.message()); return; }
-    bool ok = isMaster(String(doc["code"] | ""));
-    if (!ok) EventLog::add("Senha mestre errada no admin");
-    authRemote.record(ok);
-    if (!ok) { wsReply(client, c, false, "Senha mestre incorreta."); return; }
+    String erro = checkMaster(doc["code"] | "");
+    if (erro.length()) {
+      if (erro.startsWith("Senha")) EventLog::add("Senha mestre errada no admin");
+      wsReply(client, c, false, erro);
+      return;
+    }
     grantAdmin(client);
     EventLog::add("Admin aberto pela pagina web");
     wsReply(client, c, true);
@@ -1427,9 +1545,12 @@ void handleWebCommand(uint32_t client, JsonDocument& doc) {
     setupTelegram();
 
   } else if (!strcmp(c, "testTelegram")) {
-    if (!bot || cfg.chatId[0] == '\0') { ok = false; err = "Preencha o token e o ID antes."; }
-    else if (!sendTelegramAlert("✅ Teste: as notificações estão funcionando.")) {
-      ok = false; err = "O Telegram recusou. Confira o token e o ID, e se você já mandou uma mensagem para o bot.";
+    if (!telegramConfigured()) { ok = false; err = "Preencha o token e o ID antes."; }
+    else if (WiFi.status() != WL_CONNECTED) { ok = false; err = "A placa está sem Wi-Fi."; }
+    else {
+      // A resposta sai quando a tarefa do Telegram terminar (ver o loop()).
+      sendTelegramAlert("✅ Teste: as notificações estão funcionando.", client);
+      return;
     }
 
   } else if (!strcmp(c, "setSiren")) {
@@ -1440,12 +1561,10 @@ void handleWebCommand(uint32_t client, JsonDocument& doc) {
   } else if (!strcmp(c, "setMaster")) {
     String atual = doc["current"] | "";
     String nova = doc["newCode"] | "";
-    if (authRemote.remainingMs() > 0) { ok = false; err = authRemote.message(); }
+    String erro = checkMaster(atual);
+    if (erro.length()) { ok = false; err = erro.startsWith("Senha") ? String("A senha mestre atual não confere.") : erro; }
     else {
-      bool confere = isMaster(atual);
-      authRemote.record(confere);
-      if (!confere) { ok = false; err = "A senha mestre atual não confere."; }
-      else if (!soDigitos(nova) || nova.length() < 4 || nova.length() > 8) { ok = false; err = "A senha mestre precisa ter de 4 a 8 números."; }
+      if (!soDigitos(nova) || nova.length() < 4 || nova.length() > 8) { ok = false; err = "A senha mestre precisa ter de 4 a 8 números."; }
       else if (Codes::check(nova)) { ok = false; err = "Essa senha já é de um usuário."; }
       else {
         strlcpy(cfg.masterCode, nova.c_str(), sizeof(cfg.masterCode));
@@ -1531,19 +1650,30 @@ void handleWebCommand(uint32_t client, JsonDocument& doc) {
 
 void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
   if (type == WS_EVT_CONNECT) {
+    // O hotspot de resgate é aberto (sem senha de Wi-Fi): por ele, só a página
+    // de configuração. Nada de armar ou silenciar a sirene por ali.
+    if (apActive && client->client() && client->client()->localIP() == WiFi.softAPIP()) {
+      client->close();
+      return;
+    }
     Serial.printf("Cliente WebSocket #%u conectado\n", client->id());
-    client->text(getFullStateJson());
-    return;
   }
   WebCmd cmd;
   cmd.client = client->id();
   if (type == WS_EVT_DISCONNECT) {
     Serial.printf("Cliente WebSocket #%u desconectado\n", client->id());
     strlcpy(cmd.json, "{\"command\":\"_bye\"}", sizeof(cmd.json));
+  } else if (type == WS_EVT_CONNECT) {
+    // O estado inicial sai do loop(): montá-lo aqui lia as zonas enquanto o
+    // loop() as reescrevia.
+    strlcpy(cmd.json, "{\"command\":\"_hello\"}", sizeof(cmd.json));
   } else if (type == WS_EVT_DATA) {
     AwsFrameInfo *info = (AwsFrameInfo*)arg;
     if (!(info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT)) return;
-    if (len >= sizeof(cmd.json)) return;
+    if (len >= sizeof(cmd.json)) {
+      client->text("{\"type\":\"result\",\"ok\":false,\"error\":\"Comando grande demais.\"}");
+      return;
+    }
     memcpy(cmd.json, data, len);
     cmd.json[len] = '\0';
   } else {
@@ -1812,6 +1942,7 @@ void setup() {
 
   // Carrega configuração e senhas da NVS
   cfg = Storage::loadConfig();
+  startTelegram();                   // a fila já recebe avisos do boot
   strlcpy(HOSTNAME, cfg.hostname[0] ? cfg.hostname : defaultHostname().c_str(), sizeof(HOSTNAME));
   topicBase = mqttId();
   uidBase = "esp32_" + topicBase;
@@ -1840,14 +1971,29 @@ void setup() {
   }
   logBoot();
 
-  // Voltou de uma queda de energia armado: continua armado, sem contagem de saída.
-  uint8_t savedMode, savedTb;
-  if (Storage::loadArmState(savedMode, savedTb)) {
+  // Voltou de uma queda de energia: continua como estava. Armado, sem contagem
+  // de saída; disparado, disparado (cortar a energia não apaga o disparo); no
+  // meio da contagem de entrada, a contagem recomeça.
+  ArmState st = Storage::loadArmState();
+  if (st.armed) {
     isArmed = true;
-    armMode = savedMode == MODE_HOME ? MODE_HOME : MODE_AWAY;
-    tempBypass = savedTb;
+    armMode = st.mode == MODE_HOME ? MODE_HOME : MODE_AWAY;
+    tempBypass = st.tempBypass;
     updateHardwareState();
     EventLog::add("Continua armado (%s) apos reinicio", modeName(armMode));
+  }
+  int zonaSalva = st.zone < NUM_SECTORS ? st.zone : 0;
+  if (st.flags & 1) {
+    isTriggered = true;
+    triggeringSectorId = zonaSalva + 1;
+    if (cfg.sirenEnabled) { isSirenActive = true; sirenStartMs = millis(); updateSiren(); }
+    EventLog::add("Disparo continua apos reinicio: %s", zoneName(zonaSalva));
+    sendTelegramAlert(String("🚨 O alarme estava DISPARADO quando a central reiniciou (zona ") + zoneName(zonaSalva) + "). Continua disparado.");
+  } else if ((st.flags & 2) && isArmed) {
+    entryRunning = true;
+    entryEndsAt = millis() + cfg.entryDelaySec * 1000UL;
+    entryZone = zonaSalva;
+    EventLog::add("Contagem de entrada recomecou apos reinicio");
   }
 
   // Sem configuração → portal hotspot (não retorna; reinicia ao salvar).
@@ -1867,8 +2013,6 @@ void setup() {
   // --- Relógio (NTP), para o registro de eventos e o arme automático ---
   configTzTime(cfg.tz, "a.st1.ntp.br", "pool.ntp.org");
 
-  // --- Telegram (token vem da config) ---
-  setupTelegram();
   if (bootAlert.length()) sendTelegramAlert(bootAlert);
 
   // --- MQTT Setup ---
@@ -1889,7 +2033,6 @@ void setup() {
     Serial.println("AVISO: falha ao iniciar o mDNS — use o IP.");
   }
 
-  secured_client.setInsecure();
   webCmdQueue = xQueueCreate(6, sizeof(WebCmd));
   ws.onEvent(onWebSocketEvent);
   server.addHandler(&ws);
@@ -1938,6 +2081,7 @@ void checkSensors(unsigned long now) {
         entryEndsAt = now + cfg.entryDelaySec * 1000UL;
         entryZone = i;
         EventLog::add("Entrada por %s: aguardando senha", zoneName(i));
+        saveArmState();
         changed = true;
         break;
       case ZT_FOLLOWER:
@@ -1979,6 +2123,7 @@ void checkAutoArm(unsigned long now) {
   if (!(cfg.autoArmDays & (1 << t.tm_wday)) || lastDay == t.tm_yday) return;
   lastDay = t.tm_yday;
   if (isArmed) return;
+  if (isTriggered) { EventLog::add("Arme automatico cancelado: alarme disparado"); return; }
   ArmMode m = (ArmMode)cfg.autoArmMode;
   uint8_t open = armSystem(m, false, "agenda");
   if (open) {
@@ -2002,6 +2147,7 @@ const unsigned long RESCUE_MANUAL_MS = 10UL * 60UL * 1000UL;
 DNSServer rescueDns;
 unsigned long wifiDownSince = 0, lastWifiTry = 0, apManualUntil = 0;
 String rescueNetsJson = "[]";
+SemaphoreHandle_t rescueNetsMutex = xSemaphoreCreateMutex();   // a rota HTTP lê, o loop() escreve
 volatile bool rescueRescan = false;
 volatile bool rescueAuthFail = false;
 JsonDocument* volatile pendingSetup = nullptr;
@@ -2029,7 +2175,13 @@ void scanForRescue(int n) {
     o["open"] = WiFi.encryptionType(i) == WIFI_AUTH_OPEN;
   }
   WiFi.scanDelete();
-  if (arr.size()) { rescueNetsJson = ""; serializeJson(d, rescueNetsJson); }
+  if (arr.size()) {
+    String novo;
+    serializeJson(d, novo);
+    xSemaphoreTake(rescueNetsMutex, portMAX_DELAY);
+    rescueNetsJson = novo;
+    xSemaphoreGive(rescueNetsMutex);
+  }
 }
 
 void openRescueAp(bool manual) {
@@ -2058,7 +2210,6 @@ void maintainWifi(unsigned long now) {
   if (rescueAuthFail) {
     rescueAuthFail = false;
     EventLog::add("Senha mestre errada no hotspot");
-    authRemote.record(false);
   }
   if (pendingSetup) {
     JsonDocument* d = pendingSetup;
@@ -2078,7 +2229,6 @@ void maintainWifi(unsigned long now) {
       wifiDownSince = 0;
     }
     if (apActive && !manual) closeRescueAp();
-    flushPendingAlerts();
     return;
   }
   if (!wifiDownSince) {
@@ -2106,29 +2256,45 @@ void applySetup(JsonDocument& d) {
   strlcpy(cfg.ssid, ssid.c_str(), sizeof(cfg.ssid));
   // Em branco mantém a senha salva; rede aberta escolhida na lista zera.
   if (pass.length() || (d["open"] | false)) strlcpy(cfg.wifiPass, pass.c_str(), sizeof(cfg.wifiPass));
-  strlcpy(cfg.mqttHost, d["mqttHost"] | cfg.mqttHost, sizeof(cfg.mqttHost));
+  // Em branco mantém o que estava (a página vem preenchida; vazio é engano).
+  String host = d["mqttHost"] | "";
+  host.trim();
+  if (host.length()) strlcpy(cfg.mqttHost, host.c_str(), sizeof(cfg.mqttHost));
   cfg.mqttPort = d["mqttPort"] | (int)cfg.mqttPort;
-  strlcpy(cfg.mqttUser, d["mqttUser"] | "", sizeof(cfg.mqttUser));
+  String user = d["mqttUser"] | "";
+  if (user.length()) strlcpy(cfg.mqttUser, user.c_str(), sizeof(cfg.mqttUser));
   String mp = d["mqttPass"] | "";
   if (mp.length()) strlcpy(cfg.mqttPass, mp.c_str(), sizeof(cfg.mqttPass));
   String tk = d["botToken"] | "";
   tk.trim();
   if (tk.length()) strlcpy(cfg.botToken, tk.c_str(), sizeof(cfg.botToken));
-  strlcpy(cfg.chatId, d["chatId"] | "", sizeof(cfg.chatId));
+  String chat = d["chatId"] | "";
+  if (chat.length()) strlcpy(cfg.chatId, chat.c_str(), sizeof(cfg.chatId));
   if (d["dhcp"] | false) cfg.staticIp = false;      // saída de um IP fixo errado
   Storage::saveConfig(cfg);
+  setupTelegram();
   EventLog::add("Rede salva pelo hotspot%s; reiniciando", trocouRede ? " (Wi-Fi novo)" : "");
   pendingRestartAt = millis() + 1500;
 }
 
 // Rotas da página de configuração no servidor do alarme. Funcionam pelo hotspot
 // e também pela rede normal; salvar sempre exige a senha mestre atual.
+bool fromRescueAp(AsyncWebServerRequest* req) {
+  return apActive && req->client() && req->client()->localIP() == WiFi.softAPIP();
+}
+
 void setupRescueRoutes() {
-  server.on("/setup", HTTP_GET, [](AsyncWebServerRequest* req) { req->redirect("/setup/"); });
+  // exact(): uma rota "/setup" comum também casa com tudo que começa com
+  // "/setup/" (e ganha por ter sido registrada antes), e a página ficava
+  // redirecionando para ela mesma.
+  // Só pelo hotspot: na rede normal, a configuração é pelo admin (com sessão).
+  server.on(AsyncURIMatcher::exact("/setup"), HTTP_GET, [](AsyncWebServerRequest* req) { req->redirect("/setup/"); });
   server.on("/setup/", HTTP_GET, [](AsyncWebServerRequest* req) {
+    if (!fromRescueAp(req)) { req->redirect("/"); return; }
     req->send(200, "text/html; charset=utf-8", (const uint8_t*)PORTAL_HTML, strlen_P(PORTAL_HTML));
   });
   server.on("/setup/current", HTTP_GET, [](AsyncWebServerRequest* req) {
+    if (!fromRescueAp(req)) { req->send(403, "application/json", "{}"); return; }
     JsonDocument d;
     d["configured"] = true;
     d["name"] = devName();
@@ -2144,16 +2310,20 @@ void setupRescueRoutes() {
     req->send(200, "application/json", out);
   });
   server.on("/setup/scan", HTTP_GET, [](AsyncWebServerRequest* req) {
+    if (!fromRescueAp(req)) { req->send(403, "application/json", "[]"); return; }
     if (req->hasParam("again")) rescueRescan = true;   // o loop varre quando ninguém estiver no hotspot
-    req->send(200, "application/json", rescueNetsJson);
+    xSemaphoreTake(rescueNetsMutex, portMAX_DELAY);
+    String nets = rescueNetsJson;
+    xSemaphoreGive(rescueNetsMutex);
+    req->send(200, "application/json", nets);
   });
   server.on("/setup/save", HTTP_POST,
     [](AsyncWebServerRequest* req) {
       String err;
       JsonDocument* d = new JsonDocument();
-      if (!req->_tempObject || deserializeJson(*d, (const char*)req->_tempObject)) err = "Dados inválidos.";
-      else if (authRemote.remainingMs() > 0) err = authRemote.message();
-      else if (!isMaster(String((*d)["master"] | ""))) { err = "Senha mestre incorreta."; rescueAuthFail = true; }
+      if (!fromRescueAp(req)) err = "Só pelo hotspot da placa.";
+      else if (!req->_tempObject || deserializeJson(*d, (const char*)req->_tempObject)) err = "Dados inválidos.";
+      else if ((err = checkMaster((*d)["master"] | "")).length()) { if (err.startsWith("Senha")) rescueAuthFail = true; }
       else if (String((*d)["ssid"] | "").isEmpty()) err = "Escolha a rede Wi-Fi.";
       else if (pendingSetup) err = "Já está salvando.";
       if (err.length()) {
@@ -2210,6 +2380,14 @@ void loop() {
   }
   confirmFirmware(currentMillis);
   maintainWifi(currentMillis);
+  authRemote.flushNotice();
+  authKeypad.flushNotice();
+  authMaster.flushNotice();
+  TgResult tr;
+  while (tgResults && xQueueReceive(tgResults, &tr, 0) == pdTRUE) {
+    wsReply(tr.client, "testTelegram", tr.ok,
+            tr.ok ? String() : String("O Telegram recusou. Confira o token e o ID, e se você já mandou uma mensagem para o bot."));
+  }
   checkAutoArm(currentMillis);
   if (testSirenUntil && (long)(currentMillis - testSirenUntil) >= 0) { testSirenUntil = 0; updateSiren(); }
   if (testLockUntil && (long)(currentMillis - testLockUntil) >= 0) { testLockUntil = 0; updateHardwareState(); }
@@ -2282,9 +2460,7 @@ void loop() {
           }
           break;
         case KP_AUTH:
-          if (authKeypad.remainingMs() > 0) { keypadState = KP_IDLE; break; }
-          authKeypad.record(isMaster(keypadBuffer));
-          if (isMaster(keypadBuffer)) {
+          if (checkMaster(keypadBuffer).isEmpty()) {
             keypadState = KP_MENU;
             Serial.println("[KP] MENU: 1=cadastrar  2=remover  3=hotspot de configuracao  0=reset  (* cancela)");
           } else { keypadState = KP_IDLE; EventLog::add("Senha mestre errada no teclado"); }
@@ -2300,9 +2476,7 @@ void loop() {
           keypadState = KP_IDLE;
           break;
         case KP_RESET:
-          if (authKeypad.remainingMs() > 0) { keypadState = KP_IDLE; break; }
-          authKeypad.record(isMaster(keypadBuffer));
-          if (isMaster(keypadBuffer)) {
+          if (checkMaster(keypadBuffer).isEmpty()) {
             Serial.println("[KP] FACTORY RESET pelo teclado.");
             Storage::clearAll(); delay(300); ESP.restart();
           } else { Serial.println("[KP] mestre incorreta - reset cancelado"); }

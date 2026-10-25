@@ -159,20 +159,26 @@ void Storage::saveCodes(const KeypadCode* codes, int count) {
   p.end();
 }
 
-void Storage::saveArmState(bool armed, uint8_t mode, uint8_t tempBypass) {
+void Storage::saveArmState(const ArmState& st) {
   Preferences p;
   p.begin(NVS_NS, false);
-  p.putUChar("armSt", armed ? (0x80 | mode) : 0);
-  p.putUChar("armTb", armed ? tempBypass : 0);
+  p.putUChar("armSt", (st.armed ? 0x80 : 0) | (st.mode & 0x7F));
+  p.putUChar("armTb", st.armed ? st.tempBypass : 0);
+  p.putUChar("armF", st.flags);
+  p.putUChar("armZ", st.zone);
   p.end();
 }
 
-bool Storage::loadArmState(uint8_t& mode, uint8_t& tempBypass) {
+ArmState Storage::loadArmState() {
+  ArmState st{};
   Preferences p;
   p.begin(NVS_NS, true);
-  uint8_t st = p.getUChar("armSt", 0);
-  tempBypass = p.getUChar("armTb", 0);
+  uint8_t v = p.getUChar("armSt", 0);
+  st.armed = v & 0x80;
+  st.mode = v & 0x7F;
+  st.tempBypass = p.getUChar("armTb", 0);
+  st.flags = p.getUChar("armF", 0);
+  st.zone = p.getUChar("armZ", 0);
   p.end();
-  mode = st & 0x7F;
-  return st & 0x80;
+  return st;
 }

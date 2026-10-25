@@ -179,7 +179,8 @@ reset) — o portal volta a aparecer — há três caminhos:
   durante a contagem (acelera perto do fim) e fica azul quando apaga. Soltar antes cancela.
   Não segure o BOOT *ao ligar* a placa: isso põe o ESP32-C3 em modo de gravação.
 - **Teclado:** `#` → `<mestre> #` → `0` → `<mestre> #`.
-- **MQTT:** publique `factory_reset` em `homeguard/system/command`.
+- **MQTT:** publique `{"action":"factory_reset","master":"<mestre>"}` em `homeguard/system/command`
+  (sem a senha mestre é recusado: quem publica no broker não pode apagar a central).
 
 O reset apaga **tudo** da NVS: Wi-Fi, MQTT, Telegram, senha mestre e as senhas do teclado.
 
@@ -410,13 +411,13 @@ A `*` **sempre limpa os dígitos** (use no início de cada senha) — essa funç
 
 **Cadastro remoto** (sem ir ao teclado):
 
-- **MQTT** — publique no tópico `homeguard/codes/set`:
+- **MQTT** — publique no tópico `homeguard/codes/set`, sempre com a senha mestre (sem ela,
+  quem publicasse no broker criaria uma senha e desarmaria):
   ```json
-  {"action":"add","code":"4567","label":"Gui"}
-  {"action":"remove","code":"4567"}
+  {"action":"add","code":"4567","label":"Gui","master":"<mestre>"}
+  {"action":"remove","code":"4567","master":"<mestre>"}
   ```
-- **Interface web (WebSocket)** — comandos `{"command":"addCode","code":"...","label":"..."}`
-  e `{"command":"removeCode","code":"..."}`.
+- **Página de admin** ou **homeguard-admin** (aba Senhas).
 
 > A lista publicada em `homeguard/codes/list` mostra apenas **rótulos e tamanho** — nunca os
 > valores das senhas.
@@ -432,7 +433,7 @@ A `*` **sempre limpa os dígitos** (use no início de cada senha) — essa funç
 | `homeguard/siren/command` | →ESP | `ON` (ativa) / `OFF` (silencia) |
 | `homeguard/siren_enabled/command` | →ESP | `ON` / `OFF` (gating da sirene física) |
 | `homeguard/codes/set` | →ESP | JSON add/remove de senha |
-| `homeguard/system/command` | →ESP | `reboot` / `factory_reset` |
+| `homeguard/system/command` | →ESP | `reboot` / `{"action":"factory_reset","master":"..."}` |
 
 ---
 
