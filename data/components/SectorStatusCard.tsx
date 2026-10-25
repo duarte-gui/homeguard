@@ -34,13 +34,27 @@ const SectorStatusCard: React.FC<SectorStatusCardProps> = ({ sector, isTriggerin
     >
       <div>
         <div className="flex items-center justify-between mb-2">
-          <h3 className="font-semibold text-gray-200">{sector.name}</h3>
+          <div>
+            <p className="text-xs uppercase tracking-wider text-gray-500">Zona {sector.id}</p>
+            <h3 className="font-semibold text-gray-200">{sector.name}</h3>
+          </div>
           <div className="flex items-center gap-2">
             {isTriggering && <BellRingingIcon className="w-5 h-5 text-red-500 animate-pulse" />}
             <Icon className={`w-8 h-8 ${statusColor}`} />
           </div>
         </div>
         <p className={`text-2xl font-bold ${statusColor}`}>{sector.status}</p>
+        <div className="flex flex-wrap gap-2 mt-2">
+          {sector.bypass && (
+            <span className="text-xs px-2 py-0.5 rounded bg-gray-600/80 text-gray-200">Inibida: não dispara</span>
+          )}
+          {sector.tempBypass && (
+            <span className="text-xs px-2 py-0.5 rounded bg-amber-700/70 text-amber-100">Inibida até desarmar</span>
+          )}
+          {sector.is24h && (
+            <span className="text-xs px-2 py-0.5 rounded bg-purple-800/70 text-purple-100">24 horas</span>
+          )}
+        </div>
       </div>
     </div>
   );

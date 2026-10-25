@@ -10,8 +10,11 @@
 #   3. Compila o sketch para esse chip, se você não passar um build pronto.
 #   4. CONFERE se o binário foi realmente compilado para o chip conectado
 #      antes de gravar qualquer coisa.
-#   5. Constrói a interface web e a imagem LittleFS.
+#   5. Constrói a interface web e a embute no firmware (web_assets.h), antes de compilar.
 #   6. Grava tudo com o offset de bootloader correto do chip (0x0 ou 0x1000).
+#
+# Depois da primeira gravação, as atualizações podem ir pela página de admin
+# (Atualizar firmware), com o homeguard.ino.bin — sem cabo.
 #
 # --- COMO USAR ---
 #   bash flash.sh                          # detecta a porta e compila sozinho
@@ -40,9 +43,7 @@ BUILD_DIR="${2:-}"
 # ====================================================================================
 ESP32_PACKAGES_DIR="${ARDUINO15_DIR:-$HOME/.arduino15}/packages/esp32/tools"
 : "${ESPTOOL_DIR:=$(ls -d "$ESP32_PACKAGES_DIR"/esptool_py/*/ 2>/dev/null | sort -V | tail -n 1)}"
-: "${MKLITTLEFS_DIR:=$(ls -d "$ESP32_PACKAGES_DIR"/mklittlefs/*/ 2>/dev/null | sort -V | tail -n 1)}"
 [ -n "$ESPTOOL_DIR" ] && [ -d "$ESPTOOL_DIR" ] || die "esptool_py não encontrado em $ESP32_PACKAGES_DIR"
-[ -n "$MKLITTLEFS_DIR" ] && [ -d "$MKLITTLEFS_DIR" ] || die "mklittlefs não encontrado em $ESP32_PACKAGES_DIR"
 
 if [ -x "${ESPTOOL_DIR}esptool" ]; then
     ESPTOOL="${ESPTOOL_DIR}esptool"
@@ -51,7 +52,6 @@ elif [ -f "${ESPTOOL_DIR}esptool.py" ]; then
 else
     die "nem 'esptool' nem 'esptool.py' foram encontrados em $ESPTOOL_DIR"
 fi
-MKLITTLEFS="${MKLITTLEFS_DIR%/}/mklittlefs"
 
 # ====================================================================================
 # PASSO 1: DESCOBRIR A PORTA SERIAL
@@ -128,7 +128,17 @@ echo -e "Bootloader vai em ${YELLOW}${BOOTLOADER_ADDR}${NC} (chip_id esperado: $
 # PASSO 3: COMPILAR (se não veio um build pronto)
 # ====================================================================================
 if [ -z "$BUILD_DIR" ]; then
-    step "Passo 3: Compilando o firmware"
+    # A interface vai dentro do firmware: tem que estar pronta antes de compilar.
+    step "Passo 3: Construindo a interface web"
+    DATA_DIR="${SCRIPT_DIR}/data"
+    [ -f "${DATA_DIR}/package.json" ] || die "não achei ${DATA_DIR}/package.json"
+    pushd "$DATA_DIR" > /dev/null
+    [ -d node_modules ] || { echo "Instalando dependências (npm install)..."; npm install || { popd >/dev/null; die "npm install falhou."; }; }
+    npm run build || { popd > /dev/null; die "o build da interface web falhou."; }
+    popd > /dev/null
+    python3 "${SCRIPT_DIR}/tools/embed_web.py" || die "não deu para embutir a interface no firmware."
+
+    step "Passo 4: Compilando o firmware"
     command -v arduino-cli >/dev/null || die "arduino-cli não encontrado. Instale, ou passe um diretório de build:
        bash $0 $SERIAL_PORT /caminho/do/build"
 
@@ -149,21 +159,21 @@ if [ -z "$BUILD_DIR" ]; then
 
     FQBN="$BOARD"; [ -n "$OPTS" ] && FQBN="$BOARD:$OPTS"
     BUILD_DIR=$(mktemp -d -t homeguard-build-XXXXXX)
-    CLEAN_BUILD_DIR=1
+    trap 'rm -rf "$BUILD_DIR"' EXIT
     echo -e "FQBN: ${BLUE}$FQBN${NC}"
     arduino-cli compile --fqbn "$FQBN" --build-path "$BUILD_DIR" "$SCRIPT_DIR" \
         || die "a compilação falhou."
 else
     step "Passo 3: Usando o build informado"
+    echo -e "${YELLOW}A interface vai como foi embutida nesse build (web_assets.h na hora da compilação).${NC}"
     [ -d "$BUILD_DIR" ] || die "o diretório de build '$BUILD_DIR' não existe."
-    CLEAN_BUILD_DIR=0
     echo -e "Build: ${YELLOW}$BUILD_DIR${NC}"
 fi
 
 # ====================================================================================
 # PASSO 4: CONFERIR SE O BINÁRIO É DESTE CHIP
 # ====================================================================================
-step "Passo 4: Conferindo se o binário combina com a placa"
+step "Passo 5: Conferindo se o binário combina com a placa"
 
 FIRMWARE_BIN=$(find "$BUILD_DIR" -maxdepth 1 -name '*.ino.bin' | head -n 1)
 [ -n "$FIRMWARE_BIN" ] || die "não encontrei o firmware (*.ino.bin) em $BUILD_DIR"
@@ -192,62 +202,23 @@ if grep -qiE '^\s*otadata|,\s*ota\s*,' "${BUILD_DIR}/partitions.csv" 2>/dev/null
 fi
 
 # ====================================================================================
-# PASSO 5: INTERFACE WEB + IMAGEM LittleFS
+# PASSO 6: GRAVAR
 # ====================================================================================
-step "Passo 5: Construindo a interface web"
-
-DATA_DIR="${SCRIPT_DIR}/data"
-[ -f "${DATA_DIR}/package.json" ] || die "não achei ${DATA_DIR}/package.json"
-
-pushd "$DATA_DIR" > /dev/null
-[ -d node_modules ] || { echo "Instalando dependências (npm install)..."; npm install || { popd >/dev/null; die "npm install falhou."; }; }
-npm run build || { popd > /dev/null; die "o build da interface web falhou."; }
-popd > /dev/null
-[ -d "${DATA_DIR}/dist" ] || die "o build não gerou a pasta 'dist'."
-
-step "Passo 6: Montando a imagem LittleFS"
-
-PARTITIONS_CSV="${BUILD_DIR}/partitions.csv"
-[ -f "$PARTITIONS_CSV" ] || die "não achei partitions.csv em $BUILD_DIR"
-FS_LINE=$(grep -iE 'spiffs|littlefs' "$PARTITIONS_CSV" | head -n 1 | tr -d ' ')
-[ -n "$FS_LINE" ] || die "a tabela de partições não tem uma partição de dados (spiffs/littlefs)."
-FS_OFFSET=$(echo "$FS_LINE" | cut -d, -f4)
-FS_SIZE=$(echo "$FS_LINE" | cut -d, -f5)
-[ -n "$FS_OFFSET" ] && [ -n "$FS_SIZE" ] || die "não consegui ler o offset/tamanho da partição de dados."
-echo -e "Partição de dados: offset ${YELLOW}${FS_OFFSET}${NC}, tamanho ${YELLOW}${FS_SIZE}${NC}"
-
-WORK_DIR=$(mktemp -d -t homeguard-fs-XXXXXX)
-LITTLEFS_IMG="${WORK_DIR}.bin"
-cleanup() {
-    rm -rf "$WORK_DIR"
-    rm -f "$LITTLEFS_IMG"
-    [ "${CLEAN_BUILD_DIR:-0}" = "1" ] && rm -rf "$BUILD_DIR"
-    return 0
-}
-trap cleanup EXIT
-
-cp -r "${DATA_DIR}/dist/." "${WORK_DIR}/" || die "falha ao copiar os arquivos da interface."
-"$MKLITTLEFS" -c "$WORK_DIR" -b 4096 -p 256 -s "$FS_SIZE" "$LITTLEFS_IMG" \
-    || die "falha ao criar a imagem LittleFS."
-echo -e "${GREEN}Imagem LittleFS criada.${NC}"
-
-# ====================================================================================
-# PASSO 7: GRAVAR
-# ====================================================================================
-step "Passo 7: Gravando na placa"
+step "Passo 6: Gravando na placa"
 
 WRITE_ARGS=( "$BOOTLOADER_ADDR" "$BOOTLOADER_BIN" 0x8000 "$PARTITIONS_BIN" )
 [ -n "$BOOT_APP0" ] && WRITE_ARGS+=( 0xe000 "$BOOT_APP0" )
-WRITE_ARGS+=( 0x10000 "$FIRMWARE_BIN" "$FS_OFFSET" "$LITTLEFS_IMG" )
+WRITE_ARGS+=( 0x10000 "$FIRMWARE_BIN" )
 
 # --flash-mode/freq/size 'keep' preserva o que o próprio build gravou no cabeçalho
 # da imagem, em vez de chutar valores fixos que podem não bater com a placa.
 $ESPTOOL --chip "$CHIP" --port "$SERIAL_PORT" --baud 921600 \
     --before default-reset --after hard-reset write-flash -z \
     --flash-mode keep --flash-freq keep --flash-size keep \
-    "${WRITE_ARGS[@]}" || { rm -f "$LITTLEFS_IMG"; die "a gravação falhou. Confira o cabo e a porta."; }
+    "${WRITE_ARGS[@]}" || die "a gravação falhou. Confira o cabo e a porta."
 
-rm -f "$LITTLEFS_IMG"
+# O LittleFS (registro de eventos) não é gravado: a placa formata sozinha na
+# primeira vez e, nas próximas gravações, o registro fica preservado.
 echo -e "\n${GREEN}>>> Concluído: firmware + interface web gravados no ${CHIP_DESC%% *}. <<<${NC}"
 echo -e "Para acompanhar o boot:  ${BLUE}arduino-cli monitor -p $SERIAL_PORT -c baudrate=115200${NC}"
 exit 0

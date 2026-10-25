@@ -10,7 +10,9 @@ static DNSServer dns;
 static bool      g_done = false;
 
 // ── HTML do portal ────────────────────────────────────────────────
-static const char PORTAL_HTML[] PROGMEM = R"rawhtml(
+// Também servida pelo .ino em /setup/ (hotspot de resgate, com o alarme rodando):
+// por isso os fetch usam caminho relativo ('scan', 'save', 'current').
+const char PORTAL_HTML[] PROGMEM = R"rawhtml(
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -38,7 +40,8 @@ static const char PORTAL_HTML[] PROGMEM = R"rawhtml(
 </head>
 <body>
 <h1>&#x1F6E1; Homeguard</h1>
-<p class="sub">Configuração inicial &middot; acesse em http://setup.homeguard</p>
+<p class="sub" id="sub">Configuração inicial</p>
+<div class="card" id="rescue-note" style="display:none;border:1px solid #f59e0b"><p style="font-size:.85rem;color:#fbbf24">A placa está sem Wi-Fi, mas o alarme continua funcionando normalmente. Ajuste o que mudou e salve: o que ficar em branco continua como está.</p></div>
 
 <div class="card">
   <h2>Rede Wi-Fi</h2>
@@ -55,6 +58,13 @@ static const char PORTAL_HTML[] PROGMEM = R"rawhtml(
   </div>
 </div>
 
+<div class="card" id="dhcp-card" style="display:none">
+  <h2>Endereço na rede</h2>
+  <label style="display:flex;gap:8px;align-items:center;color:#fff;font-size:.9rem">
+    <input type="checkbox" id="dhcp" style="width:auto"> Voltar para IP automático (DHCP)</label>
+  <p style="color:#aaa;font-size:.78rem;margin-top:6px">A placa está com IP fixo <b id="sip"></b>. Se ninguém consegue acessá-la pela rede, marque aqui.</p>
+</div>
+
 <div class="card">
   <h2>Home Assistant / MQTT</h2>
   <label>Broker (IP do Home Assistant)</label>
@@ -66,7 +76,7 @@ static const char PORTAL_HTML[] PROGMEM = R"rawhtml(
 
 <div class="card">
   <h2>&#x1F511; Senha mestre</h2>
-  <label>4 a 8 dígitos &mdash; usada para PROGRAMAR o teclado (cadastrar/remover senhas, reset) e para desarmar no Home Assistant. Guarde com cuidado.</label>
+  <label id="master-label">4 a 8 dígitos &mdash; usada para PROGRAMAR o teclado (cadastrar/remover senhas, reset) e para desarmar no Home Assistant. Guarde com cuidado.</label>
   <input id="master" inputmode="numeric" placeholder="ex: 1234">
 </div>
 
@@ -112,11 +122,12 @@ function renderNets(){
       function(){pickNet(n.ssid,n.open);}));
   });
   el.appendChild(row('Outra rede ou oculta','digitar',askManual));
-  el.appendChild(row('Procurar de novo','&#x21bb;',function(){fetch('/scan?again=1');}));
+  el.appendChild(row('Procurar de novo','&#x21bb;',function(){fetch('scan?again=1');}));
 }
-function pickNet(s,open){selSSID=s;document.getElementById('net-list').style.display='none';
+var selOpen=false, cur={configured:false};
+function pickNet(s,open){selSSID=s;selOpen=open;document.getElementById('net-list').style.display='none';
   document.getElementById('sel-name').textContent=s;document.getElementById('sel-wrap').style.display='block';
-  document.getElementById('pass').placeholder=open?'Rede aberta':'••••••••';document.getElementById('pass').focus();}
+  document.getElementById('pass').placeholder=open?'Rede aberta':(cur.configured&&s===cur.ssid?'em branco mantém a senha salva':'••••••••');document.getElementById('pass').focus();}
 function clearSel(){selSSID='';document.getElementById('net-list').style.display='block';document.getElementById('sel-wrap').style.display='none';}
 function askManual(){
   document.getElementById('net-list').style.display='none';
@@ -133,7 +144,7 @@ function useManual(){
 // encerrava na primeira resposta 200, entao uma varredura parcial (o caso comum,
 // porque a primeira roda enquanto o hotspot ainda esta subindo) virava definitiva.
 function pollScan(){
-  fetch('/scan')
+  fetch('scan')
     .then(function(r){return r.status===202?null:r.json();})
     .then(function(d){if(d)mergeNets(d);})
     .catch(function(){})
@@ -152,7 +163,7 @@ function save(){
   var msg=document.getElementById('msg');
   if(!selSSID){msg.textContent='Selecione a rede Wi-Fi.';return;}
   if(!val('mqttHost')){msg.textContent='Informe o broker MQTT.';return;}
-  if(val('master').length<4){msg.textContent='Defina a senha mestre (mín. 4 dígitos).';return;}
+  if(val('master').length<4){msg.textContent=cur.configured?'Digite a senha mestre atual para confirmar.':'Defina a senha mestre (mín. 4 dígitos).';return;}
   // Espaço no começo/fim é quase sempre acidente, mas pode ser de verdade: avisa
   // uma vez e salva no segundo toque. A senha nunca é cortada automaticamente.
   var pw=document.getElementById('pass').value;
@@ -162,13 +173,31 @@ function save(){
     mqttHost:val('mqttHost'),mqttPort:parseInt(val('mqttPort')||'1883'),
     mqttUser:val('mqttUser'),mqttPass:document.getElementById('mqttPass').value,
     master:val('master'),
-    botToken:val('botToken'),chatId:val('chatId')};
+    botToken:val('botToken'),chatId:val('chatId'),open:selOpen,dhcp:document.getElementById('dhcp').checked};
   msg.textContent='Salvando...';
-  fetch('/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)})
-   .then(function(r){return r.json()}).then(function(){
+  fetch('save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)})
+   .then(function(r){return r.json()}).then(function(r){
+     if(r.ok===false){msg.textContent=r.error||'A placa recusou.';return;}
      document.body.innerHTML='<div style="display:flex;min-height:100vh;align-items:center;justify-content:center;flex-direction:column;font-family:system-ui;color:#fff;background:#14151a;padding:24px"><div style="font-size:2rem">&#x2705;</div><h2 style="color:#4ade80;margin:8px 0">Configurado!</h2><p style="color:#aaa;text-align:center">O Homeguard vai reiniciar e conectar na sua rede.</p></div>';
    }).catch(function(){msg.textContent='Erro ao salvar.';});
 }
+// Placa já configurada (hotspot de resgate): preenche com o que está salvo.
+// Senhas e token nunca vêm; em branco = mantém.
+fetch('current').then(function(r){return r.json();}).then(function(c){
+  cur=c; if(!c.configured) return;
+  document.getElementById('sub').textContent=c.name||'Homeguard';
+  document.getElementById('rescue-note').style.display='block';
+  document.getElementById('mqttHost').value=c.mqttHost||'';
+  document.getElementById('mqttPort').value=c.mqttPort||1883;
+  document.getElementById('mqttUser').value=c.mqttUser||'';
+  document.getElementById('mqttPass').placeholder=c.hasMqttPass?'em branco mantém':'';
+  document.getElementById('chatId').value=c.chatId||'';
+  document.getElementById('botToken').placeholder=c.hasToken?'salvo (em branco mantém)':'123456:ABC...';
+  document.getElementById('master-label').textContent='Senha mestre ATUAL, para confirmar a mudança (não troca a senha).';
+  document.getElementById('master').type='password';
+  if(c.staticIp){document.getElementById('dhcp-card').style.display='block';document.getElementById('sip').textContent=c.staticIp;}
+  if(c.ssid) pickNet(c.ssid,false);
+}).catch(function(){});
 pollScan();
 </script>
 </body>
@@ -283,6 +312,7 @@ void Provisioning::begin() {
   server.on("/",     HTTP_GET,  handleRoot);
   server.on("/scan", HTTP_GET,  handleScan);
   server.on("/save", HTTP_POST, handleSave);
+  server.on("/current", HTTP_GET, []() { server.send(200, "application/json", "{\"configured\":false}"); });
   // captive portal (iOS / Android / Windows)
   server.on("/hotspot-detect.html",       HTTP_GET, handleRedirect);
   server.on("/library/test/success.html", HTTP_GET, handleRedirect);

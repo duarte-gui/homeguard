@@ -45,7 +45,16 @@ Um código de **4 a 8 dígitos**. É a senha mais importante: além de armar/des
   - Estado **`triggered`** do painel + **availability/LWT** (entidades ficam `unavailable` se o ESP cair)
 - **Configuração por hotspot** (captive portal no celular) — sem segredos no código, tudo em NVS
 - **Cadastro de senhas** do teclado — local (no próprio teclado) e remoto (MQTT / interface web)
-- Arquivos da interface servidos diretamente do ESP32 via **LittleFS** (sem depender de CDN externo)
+- **Modos de arme** Ausente (todas as zonas) e Em casa (só as zonas escolhidas, ex.: o perimetro), os mesmos do painel do Home Assistant
+- **Tipos de zona**: instantânea, entrada/saída (com tempo de entrada e de saída), seguidora e 24 horas
+- **Aviso ao armar com zona aberta**: a página pergunta; teclado e HA armam e inibem a zona até desarmar, avisando no Telegram
+- **Continua armado depois de falta de energia** (o estado fica gravado)
+- **Registro de eventos** com data e hora (NTP): quem armou/desarmou e com qual senha, disparos, senhas erradas, pânico. Guarda os últimos 200, mesmo após reiniciar
+- **Arme automático** em horário e dias escolhidos; se houver zona aberta, não arma e avisa
+- **Aviso de zona aberta há muito tempo** (portão esquecido)
+- **Página de admin** (senha mestre): zonas, senhas, senha de pânico, tempos, agenda, Telegram, rede, backup/restauração e **atualização do firmware pelo navegador (OTA)**, com volta automática para a versão anterior se a nova não subir
+- **Várias placas na mesma casa**: nome na rede, ID no MQTT e nome no HA próprios de cada placa
+- Interface web **embutida no firmware** (sem depender de CDN externo)
 
 ---
 
@@ -231,7 +240,7 @@ No arquivo `.vscode/arduino.json` (criado pela extensão Arduino):
 ```json
 {
   "board": "esp32:esp32:esp32c3",
-  "configuration": "JTAGAdapter=default,CDCOnBoot=cdc,PartitionScheme=huge_app,CPUFreq=160,FlashMode=qio,FlashFreq=80,FlashSize=4M,UploadSpeed=921600,DebugLevel=none,EraseFlash=none,ZigbeeMode=default",
+  "configuration": "JTAGAdapter=default,CDCOnBoot=cdc,PartitionScheme=min_spiffs,CPUFreq=160,FlashMode=qio,FlashFreq=80,FlashSize=4M,UploadSpeed=921600,DebugLevel=none,EraseFlash=none,ZigbeeMode=default",
   "port": "/dev/ttyACM0",
   "programmer": "esp32:esptool",
   "sketch": "homeguard.ino"
@@ -247,7 +256,19 @@ No arquivo `.vscode/arduino.json` (criado pela extensão Arduino):
 > GPIO, então o `Serial` precisa sair pelo USB. Com `CDCOnBoot=default` você não veria
 > log nenhum.
 
-**Sobre o `PartitionScheme=huge_app`:** no esquema `default` o firmware ocupa 91% da partição de app (1,19 MB de 1,31 MB), sem margem para crescer, porque metade da flash fica reservada para uma partição OTA que o projeto não usa. O `huge_app` (3 MB app / 1 MB SPIFFS) derruba o uso para 37% e ainda deixa ~900 KB de sistema de arquivos para uma interface de 172 KB. O custo é abrir mão de OTA — o deploy é sempre por serial via `flash.sh`.
+**Sobre o `PartitionScheme=min_spiffs`:** dois slots de 1,9 MB para o firmware (o
+atual e o que recebe a atualização por OTA) e 128 KB de LittleFS para o registro de
+eventos. O firmware, com a interface embutida, ocupa ~1,47 MB (74% do slot).
+
+A interface web vai **dentro do firmware** (`web_assets.h`, gerado por
+`tools/embed_web.py` a partir de `data/dist`, com gzip). Assim uma única atualização
+leva firmware e página juntos. `web_assets.h` não vai para o git: gere antes de
+compilar (o `flash.sh` faz isso). Sem ele, o firmware compila, mas a página só mostra
+um aviso.
+
+> **Placa que estava com `huge_app`** (versões até 2.1): grave uma vez pelo cabo com o
+> `flash.sh`. A configuração e as senhas ficam (a NVS está no mesmo lugar nas duas
+> tabelas). Depois disso, as atualizações podem ir pela página de admin.
 
 > No Linux, o usuário precisa estar no grupo dono do device (`uucp` no Arch, `dialout`
 > no Debian/Ubuntu): `sudo usermod -aG uucp $USER` — é preciso relogar depois.
@@ -268,6 +289,8 @@ A interface web fica em `data/` e precisa ser compilada antes de gravar no ESP32
 cd data
 npm install
 npm run build   # Gera os arquivos em data/dist/
+cd ..
+python3 tools/embed_web.py   # data/dist -> web_assets.h (embutido no firmware)
 ```
 
 O build usa **Parcel** e gera arquivos otimizados com Tailwind CSS bundlado localmente em `data/dist/`.
@@ -277,13 +300,21 @@ O build usa **Parcel** e gera arquivos otimizados com Tailwind CSS bundlado loca
 ## Deploy no ESP32
 
 O script `flash.sh` faz tudo em uma execução: descobre a porta, identifica o chip,
-compila, confere se o binário é daquele chip, faz o build da interface, monta a imagem
-LittleFS e grava.
+faz o build da interface e a embute, compila, confere se o binário é daquele chip e grava.
+
+Depois da primeira gravação pelo cabo, dá para atualizar sem cabo: **Admin → Atualizar
+firmware**, com o `homeguard.ino.bin` do build — ou pelo `homeguard-admin`
+(`tools/homeguard-admin`), que baixa a versão do último release do GitHub.
+
+Para publicar uma versão: suba o `HG_FW_VERSION` no `homeguard.ino`, faça commit e push,
+e rode `bash tools/release.sh` (compila e cria o release `v<versão>` com o
+`homeguard.ino.bin` anexado). Se a versão nova travar, reiniciar ou
+não conectar no Wi-Fi no primeiro minuto, a placa volta sozinha para a anterior.
 
 ### Pré-requisitos do script
 
-- **esptool** e **mklittlefs** — vêm no pacote ESP32 do Arduino; o script **detecta a
-  versão instalada sozinho** sob `$HOME/.arduino15`, sem editar caminho nenhum.
+- **esptool** — vem no pacote ESP32 do Arduino; o script **detecta a versão instalada
+  sozinho** sob `$HOME/.arduino15`, sem editar caminho nenhum.
 - **Node.js e npm** — para o build da interface web.
 - **arduino-cli** — só é necessário se você não passar um diretório de build pronto.
 
@@ -291,7 +322,6 @@ Para apontar para uma instalação fora do padrão, exporte antes de rodar:
 
 ```bash
 export ESPTOOL_DIR="/caminho/para/esptool_py/5.3.1/"        # com barra no final
-export MKLITTLEFS_DIR="/caminho/para/mklittlefs/4.0.2-db0513a"
 ```
 
 ### Uso
@@ -309,17 +339,15 @@ O que ele faz, na ordem:
    o grupo exato e o comando para corrigir.
 2. **Identifica o chip** perguntando ao próprio silício via `esptool`, e daí deriva o
    offset do bootloader: **0x1000** no ESP32 e no S2, **0x0** em C3/C6/H2/S3/P4.
-3. **Compila** com o FQBN de `.vscode/arduino.json` — e **aborta** se a placa configurada
+3. `npm install` + `npm run build` na pasta `data/` e `tools/embed_web.py`.
+4. **Compila** com o FQBN de `.vscode/arduino.json` — e **aborta** se a placa configurada
    ali não for a que está no cabo.
-4. **Confere o binário**: lê o `chip_id` do cabeçalho da imagem (`esp_image_header_t`) e
+5. **Confere o binário**: lê o `chip_id` do cabeçalho da imagem (`esp_image_header_t`) e
    compara com o chip detectado. Se não bater, não grava — em vez de deixar a placa sem
    bootar.
-5. `npm install` + `npm run build` na pasta `data/`.
-6. Lê a tabela de partições do build para achar o offset e o tamanho reais do LittleFS.
-7. Grava bootloader, tabela de partições, `boot_app0`, firmware e sistema de arquivos,
-   com `--flash-mode/freq/size keep` (preserva o que o build gravou no cabeçalho, em vez
-   de chutar valores fixos).
-8. Limpa os temporários.
+6. Grava bootloader, tabela de partições, `boot_app0` e firmware, com
+   `--flash-mode/freq/size keep` (preserva o que o build gravou no cabeçalho, em vez de
+   chutar valores fixos). O LittleFS não é gravado: o registro de eventos fica preservado.
 
 ---
 
@@ -327,17 +355,28 @@ O que ele faz, na ordem:
 
 Após o ESP32 iniciar e conectar ao broker MQTT, as entidades são criadas automaticamente no Home Assistant via **MQTT Discovery**:
 
+Os tópicos começam pelo **ID no MQTT** da placa (Admin → Rede). Placas configuradas
+antes da versão 2.2 continuam com `homeguard`, para não mudar as entidades que já
+existem no HA; placas novas usam `homeguard-XXXX` (os 4 dígitos do hotspot do portal).
+Duas placas no mesmo broker precisam de IDs diferentes.
+
 | Entidade | Tipo | Tópico de estado |
 |---|---|---|
-| ESP32 Homeguard (painel) | `alarm_control_panel` | `homeguard/alarm/state` (`disarmed`/`armed_away`/`triggered`) |
+| ESP32 Homeguard (painel) | `alarm_control_panel` | `homeguard/alarm/state` (`disarmed`/`arming`/`armed_away`/`armed_home`/`pending`/`triggered`) |
 | ESP32 Homeguard Siren | `switch` | `homeguard/siren/state` |
 | ESP32 Homeguard Sirene habilitada | `switch` | `homeguard/siren_enabled/state` (gating) |
 | Portão Garagem | `binary_sensor` | `homeguard/sector/1/state` |
 | Presença Garagem | `binary_sensor` | `homeguard/sector/2/state` |
 | Portão Principal | `binary_sensor` | `homeguard/sector/3/state` |
 | Porta Gui | `binary_sensor` | `homeguard/sector/4/state` |
+| ESP32 Homeguard Coação | `event` | `homeguard/event` (`duress`) |
+| ESP32 Homeguard Avisos | `event` | `homeguard/notice` (`zone_open_long`, `auto_arm_failed`, `lockout`) |
 
-**Armar** não exige código. **Desarmar** exige o **PIN** definido no portal de configuração.
+O painel aceita **Ausente** e **Em casa**. Pelo HA, armar com uma zona
+instantânea aberta arma assim mesmo e deixa essa zona inibida até desarmar (o HA não
+tem como perguntar), com aviso no Telegram.
+
+**Armar** não exige código. **Desarmar** exige uma senha cadastrada (as do teclado ou a mestre). Automações do HA que desarmam sem código deixam de funcionar.
 Quando há violação com o sistema armado, o painel vai para `triggered` (mesmo que a sirene
 física esteja desabilitada) — útil para automações no HA (ex.: alerta falado na Alexa).
 
